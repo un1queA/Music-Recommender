@@ -7,7 +7,7 @@
 #pip install streamlit
 #pip install streamlit -U streamlit
 #pip install -U langchain-openai
-#Run with this command ==> python -m streamlit run IAMUSIC2.py --logger.level=error to run the script with error logging level
+#Run with this command ==> python -m streamlit run IAMUSIC.py --logger.level=error to run the script with error logging level
 
 import streamlit as st
 import os
@@ -231,7 +231,7 @@ def main_app():
                 st.write(f"- {song}")
                 
                 # Get YouTube link for each song
-                if video_url := youtube_search(artist, song):  # Fixed: pass both artist and song
+                if video_url := youtube_search(artist, song):  
                     st.video(video_url)
                 else:
                     st.warning("Video not found")
