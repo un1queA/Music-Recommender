@@ -2,7 +2,8 @@ streamlit==1.28.0          # The web framework you're using
 langchain==0.0.347         # AI/LLM framework
 langchain-community==0.0.7 # Community extensions for LangChain
 langchain-openai==0.0.2    # OpenAI integration for LangChain
-youtube-search==2.1.2      # YouTube search functionality
+youtube-search-python==1.6.6 # YouTube search functionality
 openai==1.3.0              # Direct OpenAI API access
 python-dotenv==1.0.0       # Environment variable management
 httpx==0.24.1              # HTTP client (required by some packages)
+
