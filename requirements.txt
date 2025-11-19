@@ -1,20 +1,7 @@
-streamlit>=1.28.0          # The web framework you're using
-langchain-core>=0.1.0        # AI/LLM framework
-langchain-community==0.0.10 # Community extensions for LangChain
-langchain-openai>=0.0.5  # OpenAI integration for LangChain
-youtube-search-python==1.6.6 # YouTube search functionality
-openai>=1.10.0             # Direct OpenAI API access
-python-dotenv>=1.0.0       # Environment variable management
-httpx==0.24.1              # HTTP client (required by some packages)
-tiktoken<=0.5.0
-
-
-
-
-
-
-
-
-
-
-
+streamlit==1.28.0
+langchain==0.1.0
+langchain-community==0.0.10
+langchain-openai==0.0.5
+youtube-search-python==1.6.6
+openai==1.10.0
+python-dotenv==1.0.0
