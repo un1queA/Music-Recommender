@@ -1,8 +1,10 @@
 streamlit
 langchain==0.0.347
 youtube-search
+langchain-openai
 openai
 python-dotenv
+
 
 
 
