@@ -40,17 +40,24 @@ def clean_artist_name(artist):
 def initialize_llm():
     """Initialize the LLM with the current API key"""
     try:
-        from langchain_openai import ChatOpenAI
+        # Use the OLD import path that's built into langchain
+        from langchain.chat_models import ChatOpenAI
+        
+        api_key = st.secrets.get("OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY")
+        
+        if not api_key:
+            st.error("OpenAI API key not found. Please add it to Streamlit secrets.")
+            return None
+            
         llm = ChatOpenAI(
             model="gpt-4", 
             temperature=1.0,
-            openai_api_key=os.environ.get("OPENAI_API_KEY")  # Pass the API key directly
-        ) #using chatgpt4 as our LLM (Large Language Model) for generating responses, the temperature indicates how creative/random the response from chatgpt will be
+            openai_api_key=api_key
+        )
         return llm
     except Exception as e:
         st.error(f"Failed to initialize OpenAI: {e}")
         return None
-
 def generate_artist_and_songs(genre):
     """Generate artist and song recommendations with duplicate prevention"""
     
@@ -258,5 +265,6 @@ if not st.session_state.api_key_valid:
     st.info("🔑 Please enter your OpenAI API key in the sidebar to use the app.")
 else:
     main_app()
+
 
 
