@@ -8,7 +8,7 @@ Have fun!
 
 # 🎵 AI Music Recommender
 
-[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](music-recommender-ry79jwgtlxcobwwc7yzydz.streamlit.app)
+[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)]([music-recommender-ry79jwgtlxcobwwc7yzydz.streamlit.app](https://music-recommender-ry79jwgtlxcobwwc7yzydz.streamlit.app/))
 
 An intelligent music discovery platform that uses AI to recommend artists and songs based on your favorite genres, complete with YouTube music video integration.
 
