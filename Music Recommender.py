@@ -7,7 +7,7 @@
 #pip install streamlit
 #pip install streamlit -U streamlit
 #pip install -U langchain-openai
-#Run with this command ==> python -m streamlit run IAMUSIC.py --logger.level=error to run the script with error logging level
+#Run with this command ==> python -m streamlit run IAMUSIC2.py --logger.level=error to run the script with error logging level
 
 import streamlit as st
 import os
@@ -40,24 +40,17 @@ def clean_artist_name(artist):
 def initialize_llm():
     """Initialize the LLM with the current API key"""
     try:
-        # Use the OLD import path that's built into langchain
-        from langchain.chat_models import ChatOpenAI
-        
-        api_key = st.secrets.get("OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY")
-        
-        if not api_key:
-            st.error("OpenAI API key not found. Please add it to Streamlit secrets.")
-            return None
-            
+        from langchain_openai import ChatOpenAI
         llm = ChatOpenAI(
             model="gpt-4", 
             temperature=1.0,
-            openai_api_key=api_key
-        )
+            openai_api_key=os.environ.get("OPENAI_API_KEY")  # Pass the API key directly
+        ) #using chatgpt4 as our LLM (Large Language Model) for generating responses, the temperature indicates how creative/random the response from chatgpt will be
         return llm
     except Exception as e:
         st.error(f"Failed to initialize OpenAI: {e}")
         return None
+
 def generate_artist_and_songs(genre):
     """Generate artist and song recommendations with duplicate prevention"""
     
@@ -118,43 +111,93 @@ def generate_artist_and_songs(genre):
     st.error("Couldn't find a new artist after 5 attempts. Try a different genre or reset memory.")
     return None
 
+
 def youtube_search(artist: str, song: str) -> str:
     """Search for official music video on YouTube"""
     try:
+        # Clean the song name by removing common symbols and extra words
+        clean_song = re.sub(r'[^\w\s]', '', song).lower()
         # Try multiple search queries to find official video
         search_queries = [
             f"{artist} {song} official music video",
-            f"{song} {artist} official music video"
+            f"{song} {artist} official music video",
+            f"{artist} {song} official video",
+             f"{artist} {song} official music video",
+            f"{song} {artist}",
+            f"{artist} {song}",
         ]
         
+
+        best_result = None
+        best_score = 0
+        
         for query in search_queries:
-            results = YoutubeSearch(query, max_results=3).to_dict()
+            results = YoutubeSearch(query, max_results=5).to_dict()
             
             for result in results:
                 video_title = result['title'].lower()
                 channel_name = result['channel'].lower()
-                artist_lower = artist.lower()
+                video_id = result['id']
                 
-                # Check if this looks like an official video
-                is_official = (
-                    not any(term in video_title for term in ['lyric', 'cover', 'fan']) and
-                    (artist_lower in channel_name or 
-                     'official' in channel_name or 
-                     'vevo' in channel_name)
-                )
+                # Calculate a relevance score for this result
+                score = calculate_relevance_score(video_title, channel_name, artist, clean_song)
                 
-                if is_official:
-                    return f"https://www.youtube.com/watch?v={result['id']}"
+                # If we find a perfect match, return immediately
+                if score >= 0.9:
+                    return f"https://www.youtube.com/watch?v={video_id}"
+                
+                # Track the best result so far
+                if score > best_score:
+                    best_score = score
+                    best_result = video_id
         
-        # Fallback: return first result if no official video found
-        if results:
-            return f"https://www.youtube.com/watch?v={results[0]['id']}"
+        # Return the best result if it meets minimum threshold
+        if best_result and best_score >= 0.6:  # At least 60% match
+            return f"https://www.youtube.com/watch?v={best_result}"
+        else:
+            return None
             
-        return None
-        
     except Exception as e:
         st.error(f"YouTube search error: {e}")
         return None
+    
+def calculate_relevance_score(video_title: str, channel_name: str, artist: str, clean_song: str) -> float:
+    """Calculate how relevant a YouTube video is to the requested artist and song"""
+    score = 0.0
+    
+    
+    # 1. Check if artist is in channel name (very important)
+    if artist in channel_name:
+        score += 0.5
+    elif 'official' in channel_name or 'vevo' in channel_name:
+        score += 0.3
+
+    # 2. Check if song title appears in video title
+    song_words = set(clean_song.split())
+    title_words = set(video_title.split())
+    
+    # Count matching words between song and video title
+    matching_words = song_words.intersection(title_words)
+    if len(song_words) > 0:
+        title_match_ratio = len(matching_words) / len(song_words)
+        score += title_match_ratio * 0.3
+    
+    # 3. Check for official indicators in title
+    if 'official' in video_title and 'music video' in video_title:
+        score += 0.2
+    
+    # 4. Penalize for unwanted content types
+    unwanted_terms = ['lyric', 'lyrics', 'cover', 'tribute', 'fan', 'karaoke', 'instrumental']
+    for term in unwanted_terms:
+        if term in video_title:
+            score -= 0.3
+            break
+    
+   
+    
+    # Ensure score is between 0 and 1
+    return max(0.0, min(1.0, score))
+
 #Takes the artist and song name to search for its offical music video on Youtube, if it finds the video it will return the link to the video, if not it will return None. The limit is set to 1 to only get the first result.
 
 # =============================================================================
@@ -238,7 +281,7 @@ def main_app():
                 st.write(f"- {song}")
                 
                 # Get YouTube link for each song
-                if video_url := youtube_search(artist, song):  
+                if video_url := youtube_search(artist, song):  # Fixed: pass both artist and song
                     st.video(video_url)
                 else:
                     st.warning("Video not found")
@@ -265,6 +308,5 @@ if not st.session_state.api_key_valid:
     st.info("🔑 Please enter your OpenAI API key in the sidebar to use the app.")
 else:
     main_app()
-
 
 
