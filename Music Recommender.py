@@ -130,6 +130,7 @@ def youtube_search(artist: str, song: str) -> str:
 
         best_result = None
         best_score = 0
+        best_title = ""
         
         for query in search_queries:
             results = YoutubeSearch(query, max_results=5).to_dict()
@@ -150,6 +151,7 @@ def youtube_search(artist: str, song: str) -> str:
                 if score > best_score:
                     best_score = score
                     best_result = video_id
+                    best_title = video_title
         
         # Return the best result if it meets minimum threshold
         if best_result and best_score >= 0.6:  # At least 60% match
@@ -169,18 +171,24 @@ def calculate_relevance_score(video_title: str, channel_name: str, artist: str, 
     # 1. Check if artist is in channel name (very important)
     if artist in channel_name:
         score += 0.5
-    elif 'official' in channel_name or 'vevo' in channel_name:
+    elif 'official' in channel_name or artist in channel_name:
         score += 0.3
 
     # 2. Check if song title appears in video title
-    song_words = set(clean_song.split())
-    title_words = set(video_title.split())
+    clean_video_title = re.sub(r'[^\w\s]', '', video_title)
     
-    # Count matching words between song and video title
-    matching_words = song_words.intersection(title_words)
-    if len(song_words) > 0:
-        title_match_ratio = len(matching_words) / len(song_words)
-        score += title_match_ratio * 0.3
+    # Check for exact song title match
+    if clean_song in clean_video_title:
+        score += 0.3
+    else:
+        # Word-by-word matching as fallback
+        song_words = set(clean_song.split())
+        title_words = set(clean_video_title.split())
+        
+        matching_words = song_words.intersection(title_words)
+        if len(song_words) > 0:
+            title_match_ratio = len(matching_words) / len(song_words)
+            score += title_match_ratio * 0.2
     
     # 3. Check for official indicators in title
     if 'official' in video_title and 'music video' in video_title:
@@ -190,7 +198,7 @@ def calculate_relevance_score(video_title: str, channel_name: str, artist: str, 
     unwanted_terms = ['lyric', 'lyrics', 'cover', 'tribute', 'fan', 'karaoke', 'instrumental']
     for term in unwanted_terms:
         if term in video_title:
-            score -= 0.3
+            score -= 0.4
             break
     
    
