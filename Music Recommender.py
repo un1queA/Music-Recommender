@@ -115,54 +115,62 @@ def generate_artist_and_songs(genre):
 def youtube_search(artist: str, song: str) -> str:
     """Search for official music video on YouTube"""
     try:
-        # Clean the song name by removing common symbols and extra words
-        clean_song = re.sub(r'[^\w\s]', '', song).lower()
+        # Clean the inputs
+        artist_lower = artist.lower().strip()
+        song_lower = song.lower().strip()
+        
         # Try multiple search queries to find official video
         search_queries = [
+            f'"{artist}" "{song}" official music video',
             f"{artist} {song} official music video",
-            f"{song} {artist} official music video",
+            f"{song} by {artist} official music video",
             f"{artist} {song} official video",
-            f"{artist} {song} official video",
-            f"{song} {artist}",
+            f"{artist} {song} music video",
+            f"{song} {artist} official",
             f"{artist} {song}",
+            f"{song} {artist}",
         ]
         
-
         best_result = None
         best_score = 0
-       
         
         for query in search_queries:
-            results = YoutubeSearch(query, max_results=5).to_dict()
-            
-            for result in results:
-                video_title = result['title'].lower()
-                channel_name = result['channel'].lower()
-                video_id = result['id']
+            try:
+                results = YoutubeSearch(query, max_results=5).to_dict()
                 
-                # Calculate a relevance score for this result
-                score = calculate_relevance_score(video_title, channel_name, artist, clean_song)
-                
-                # If we find a perfect match, return immediately
-                if score >= 0.7:
-                    return f"https://www.youtube.com/watch?v={video_id}"
-                
-                # Track the best result so far
-                if score > best_score:
-                    best_score = score
-                    best_result = video_id
+                for result in results:
+                    video_title = result['title'].lower()
+                    channel_name = result['channel'].lower()
+                    video_id = result['id']
                     
+                    # Calculate a relevance score for this result
+                    score = calculate_relevance_score(video_title, channel_name, artist_lower, song_lower)
+                    
+                    # Debug info (uncomment to see scoring)
+                    # st.write(f"Query: {query} | Score: {score:.2f} | Title: {video_title[:50]}...")
+                    
+                    # If we find a good match, return immediately
+                    if score >= 0.7:
+                        return f"https://www.youtube.com/watch?v={video_id}"
+                    
+                    # Track the best result so far
+                    if score > best_score:
+                        best_score = score
+                        best_result = video_id
+                        
+            except Exception as query_error:
+                # Continue with next query if one fails
+                continue
         
         # Return the best result if it meets minimum threshold
-        if best_result and best_score >= 0.6:  # At least 60% match
+        if best_result and best_score >= 0.4:  # Lower threshold to 40%
             return f"https://www.youtube.com/watch?v={best_result}"
         else:
             return None
             
     except Exception as e:
-            st.error(f"YouTube search error: {e}")
-            return None
-    
+        st.error(f"YouTube search error: {e}")
+        return None
 def calculate_relevance_score(video_title: str, channel_name: str, artist: str, clean_song: str) -> float:
     """Calculate how relevant a YouTube video is to the requested artist and song"""
     score = 0.0
@@ -316,5 +324,6 @@ if not st.session_state.api_key_valid:
     st.info("🔑 Please enter your OpenAI API key in the sidebar to use the app.")
 else:
     main_app()
+
 
 
