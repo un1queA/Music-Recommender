@@ -169,7 +169,7 @@ def calculate_relevance_score(video_title: str, channel_name: str, artist: str, 
     
     
     # 1. Check if artist is in channel name (very important)
-    if clean_artist_name in channel_name:
+    if artist in channel_name:
         score += 0.5
     elif 'official' in channel_name or artist in channel_name:
         score += 0.3
