@@ -171,21 +171,26 @@ def youtube_search(artist: str, song: str) -> str:
     except Exception as e:
         st.error(f"YouTube search error: {e}")
         return None
-def calculate_relevance_score(video_title: str, channel_name: str, artist: str, clean_song: str) -> float:
+
+
+def calculate_relevance_score(video_title: str, channel_name: str, artist: str, song: str) -> float:
     """Calculate how relevant a YouTube video is to the requested artist and song"""
     score = 0.0
     
+    # Clean the inputs for better matching
+    clean_artist = re.sub(r'[^\w\s]', '', artist).strip()
+    clean_song = re.sub(r'[^\w\s]', '', song).strip()
+    clean_video_title = re.sub(r'[^\w\s]', '', video_title).strip()
     
     # 1. Check if artist is in channel name (very important)
-    if artist in channel_name:
-        score += 0.5
-    elif 'official' in channel_name or artist in channel_name:
+    if clean_artist in channel_name:
+        score += 0.4
+    elif 'official' in channel_name and any(word in channel_name for word in clean_artist.split()):
         score += 0.3
+    elif 'vevo' in channel_name:
+        score += 0.2
 
     # 2. Check if song title appears in video title
-    clean_video_title = re.sub(r'[^\w\s]', '', video_title)
-    
-    # Check for exact song title match
     if clean_song in clean_video_title:
         score += 0.3
     else:
@@ -200,19 +205,28 @@ def calculate_relevance_score(video_title: str, channel_name: str, artist: str, 
     
     # 3. Check for official indicators in title
     if 'official' in video_title and 'music video' in video_title:
-        score += 0.2
+        score += 0.15
+    elif 'official' in video_title:
+        score += 0.1
     
-    # 4. Penalize for unwanted content types
-    unwanted_terms = ['lyric', 'lyrics', 'cover', 'tribute', 'fan', 'karaoke', 'instrumental']
+    # 4. Check if artist appears in video title
+    if any(word in clean_video_title for word in clean_artist.split()):
+        score += 0.1
+    
+    # 5. Penalize for unwanted content types
+    unwanted_terms = ['lyric', 'lyrics', 'cover', 'tribute', 'fan', 'karaoke', 'instrumental', 'reaction', 'review']
     for term in unwanted_terms:
         if term in video_title:
-            score -= 0.4
+            score -= 0.3
             break
     
-   
+    # 6. Bonus for exact matches
+    if f"{clean_artist} {clean_song}" in clean_video_title:
+        score += 0.2
     
     # Ensure score is between 0 and 1
     return max(0.0, min(1.0, score))
+
 
 #Takes the artist and song name to search for its offical music video on Youtube, if it finds the video it will return the link to the video, if not it will return None. The limit is set to 1 to only get the first result.
 
