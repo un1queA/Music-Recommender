@@ -52,7 +52,7 @@ def initialize_llm():
         return None
 
 def generate_artist_and_songs(genre):
-    """Generate artist and song recommendations with duplicate prevention"""
+    """Generate artist and song recommendations with duplicate prevention and video availability check"""
     
     # Import here to avoid circular imports
     from langchain.prompts import PromptTemplate
@@ -63,7 +63,7 @@ def generate_artist_and_songs(genre):
         st.error("LLM not initialized. Please check your API key.")
         return None
 
-    # Define prompt templates
+    # Define prompt templates - UPDATED to request songs with official music videos
     prompt_template_genre = PromptTemplate(
         input_variables=["genre"],
         template="I am trying to discover new music. Give me artists or singers that specialize in {genre}. Suggest only one artist. Avoid duplicates or similar names to previous suggestions. Please be creative and provide any artist ranging from famous to niche!"
@@ -71,7 +71,18 @@ def generate_artist_and_songs(genre):
     
     prompt_template_song = PromptTemplate(
         input_variables=["artist_suggestion"],
-        template="Give me 3 songs from {artist_suggestion}."
+        template="""Give me 3 popular songs from {artist_suggestion} that have official music videos on YouTube. 
+        IMPORTANT: 
+        1. Only suggest songs that have official music videos
+        2. Use the original song titles in their native language - DO NOT translate them to English
+        3. Avoid songs that only have lyric videos, live performances, or fan-made content
+        4. Return only the song titles, one per line
+        5. Make sure the songs are well-known and likely to have official videos
+        
+        Examples:
+        - If the artist is BTS, use Korean titles like "Dynamite" not translations
+        - If the artist is Bad Bunny, use Spanish titles like "Tití Me Preguntó" not English translations
+        - If the artist is Lisa (Thai singer), use original titles like "LALISA" not translations"""
     )
 
     # Create chains
@@ -143,11 +154,13 @@ def find_artist_official_channel(artist: str) -> str:
 def search_in_channel(artist: str, song: str, channel_name: str) -> str:
     """Search for a song within a specific channel"""
     try:
+        # Use original song title without translation or cleaning for non-English songs
         search_queries = [
             f"{song} {artist}",
             f"{song} official",
             f"{song} music video",
-            f"{song}"
+            f"{song}",
+            f'"{song}"'  # Exact phrase search for non-English titles
         ]
         
         for query in search_queries:
@@ -170,9 +183,9 @@ def search_in_channel(artist: str, song: str, channel_name: str) -> str:
 def youtube_search(artist: str, song: str) -> str:
     """Search for official music video on YouTube with channel-first approach"""
     try:
-        # Clean the inputs
+        # Use original song title - don't lowercase or clean non-English characters
         artist_lower = artist.lower().strip()
-        song_lower = song.lower().strip()
+        # Keep song in original form for non-English titles
         
         # STEP 1: Try to find official channel first
         official_channel = find_artist_official_channel(artist)
@@ -184,12 +197,13 @@ def youtube_search(artist: str, song: str) -> str:
             if channel_video:
                 return channel_video
         
-        # STEP 3: Fallback to general search (your original method)
+        # STEP 3: Fallback to general search with better handling for non-English titles
         search_queries = [
-            f'"{artist}" "{song}" official music video',
+            f'"{artist}" "{song}" official music video',  # Exact phrase for non-English
             f"{artist} {song} official music video",
-            f"{artist} {song} music video",
+            f"{artist} {song} music video", 
             f"{song} {artist} music video",
+            f'"{song}" {artist}',  # Exact song title
             f"{artist} {song}",
             f"{song} {artist}",
         ]
@@ -207,7 +221,7 @@ def youtube_search(artist: str, song: str) -> str:
                     video_id = result['id']
                     
                     # Calculate a relevance score for this result
-                    score = calculate_relevance_score(video_title, channel_name, artist_lower, song_lower)
+                    score = calculate_relevance_score(video_title, channel_name, artist_lower, song)
                     
                     # If we find a good match, return immediately
                     if score >= 0.7:
@@ -236,9 +250,9 @@ def calculate_relevance_score(video_title: str, channel_name: str, artist: str, 
     """Calculate how relevant a YouTube video is to the requested artist and song"""
     score = 0.0
     
-    # Clean the inputs for better matching
+    # Clean artist but preserve song title for non-English characters
     clean_artist = re.sub(r'[^\w\s]', '', artist).strip()
-    clean_song = re.sub(r'[^\w\s]', '', song).strip()
+    # Don't clean song title to preserve non-English characters
     clean_video_title = re.sub(r'[^\w\s]', '', video_title).strip()
     
     # 1. Check if artist is in channel name (very important)
@@ -249,18 +263,20 @@ def calculate_relevance_score(video_title: str, channel_name: str, artist: str, 
     elif 'vevo' in channel_name:
         score += 0.2
 
-    # 2. Check if song title appears in video title
-    if clean_song in clean_video_title:
-        score += 0.3
+    # 2. Check if song title appears in video title - use original song title
+    # For non-English songs, we rely more on channel matching and less on title matching
+    song_lower = song.lower()
+    if song_lower in video_title:
+        score += 0.4  # Higher weight for exact match with original title
     else:
-        # Word-by-word matching as fallback
-        song_words = set(clean_song.split())
-        title_words = set(clean_video_title.split())
+        # For non-English titles, use partial matching
+        song_words = set(song_lower.split())
+        title_words = set(video_title.split())
         
         matching_words = song_words.intersection(title_words)
         if len(song_words) > 0:
             title_match_ratio = len(matching_words) / len(song_words)
-            score += title_match_ratio * 0.2
+            score += title_match_ratio * 0.3
     
     # 3. Check for official indicators in title
     if 'official' in video_title and 'music video' in video_title:
@@ -276,11 +292,11 @@ def calculate_relevance_score(video_title: str, channel_name: str, artist: str, 
     unwanted_terms = ['lyric', 'lyrics', 'cover', 'tribute', 'fan', 'karaoke', 'instrumental']
     for term in unwanted_terms:
         if term in video_title:
-            score -= 0.3
+            score -= 0.4  # Stronger penalty
             break
     
     # 6. Bonus for exact matches
-    if f"{clean_artist} {clean_song}" in clean_video_title:
+    if f"{clean_artist} {song_lower}" in video_title:
         score += 0.2
     
     # Ensure score is between 0 and 1
@@ -376,7 +392,7 @@ def main_app():
                     st.video(video_url)
                     st.success(f"✅ Found official video for '{song}'")
                 else:
-                    st.warning(f"❌ No suitable video found for '{song}'")
+                    st.warning(f"❌ No official video found for '{song}' - this song may not have an official music video")
             
             st.success("Done!")
 
