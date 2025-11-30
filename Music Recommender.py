@@ -115,46 +115,53 @@ def generate_artist_and_songs(genre):
 def youtube_search(artist: str, song: str) -> str:
     """Search for official music video on YouTube"""
     try:
-        # Clean the song name by removing common symbols and extra words
-        clean_song = re.sub(r'[^\w\s]', '', song).lower()
+        # Clean the inputs
+        artist_lower = artist.lower().strip()
+        song_lower = song.lower().strip()
+        
         # Try multiple search queries to find official video
         search_queries = [
+            f'"{artist}" "{song}" official music video',
             f"{artist} {song} official music video",
-            f"{song} {artist} official music video",
-            f"{artist} {song} official video",
-             f"{artist} {song} official music video",
-            f"{song} {artist}",
+            f"{artist} {song} music video",
+            f"{song} {artist}  music video",
             f"{artist} {song}",
+            f"{song} {artist}",
         ]
         
-
         best_result = None
         best_score = 0
-        best_title = ""
         
         for query in search_queries:
-            results = YoutubeSearch(query, max_results=5).to_dict()
-            
-            for result in results:
-                video_title = result['title'].lower()
-                channel_name = result['channel'].lower()
-                video_id = result['id']
+            try:
+                results = YoutubeSearch(query, max_results=5).to_dict()
                 
-                # Calculate a relevance score for this result
-                score = calculate_relevance_score(video_title, channel_name, artist, clean_song)
-                
-                # If we find a perfect match, return immediately
-                if score >= 0.9:
-                    return f"https://www.youtube.com/watch?v={video_id}"
-                
-                # Track the best result so far
-                if score > best_score:
-                    best_score = score
-                    best_result = video_id
-                    best_title = video_title
+                for result in results:
+                    video_title = result['title'].lower()
+                    channel_name = result['channel'].lower()
+                    video_id = result['id']
+                    
+                    # Calculate a relevance score for this result
+                    score = calculate_relevance_score(video_title, channel_name, artist_lower, song_lower)
+                    
+                    # Debug info (uncomment to see scoring)
+                    # st.write(f"Query: {query} | Score: {score:.2f} | Title: {video_title[:50]}...")
+                    
+                    # If we find a good match, return immediately
+                    if score >= 0.7:
+                        return f"https://www.youtube.com/watch?v={video_id}"
+                    
+                    # Track the best result so far
+                    if score > best_score:
+                        best_score = score
+                        best_result = video_id
+                        
+            except Exception as query_error:
+                # Continue with next query if one fails
+                continue
         
         # Return the best result if it meets minimum threshold
-        if best_result and best_score >= 0.6:  # At least 60% match
+        if best_result and best_score >= 0.4:  # Lower threshold to 40%
             return f"https://www.youtube.com/watch?v={best_result}"
         else:
             return None
@@ -167,8 +174,7 @@ def calculate_relevance_score(video_title: str, channel_name: str, artist: str, 
     """Calculate how relevant a YouTube video is to the requested artist and song"""
     score = 0.0
     
-    #Clean the inputs for better matching
-
+    # Clean the inputs for better matching
     clean_artist = re.sub(r'[^\w\s]', '', artist).strip()
     clean_song = re.sub(r'[^\w\s]', '', song).strip()
     clean_video_title = re.sub(r'[^\w\s]', '', video_title).strip()
@@ -179,8 +185,8 @@ def calculate_relevance_score(video_title: str, channel_name: str, artist: str, 
     elif 'official' in channel_name and any(word in channel_name for word in clean_artist.split()):
         score += 0.3
 
-    # 2. Check if song title appears in video title   
-  
+
+    # 2. Check if song title appears in video title
     if clean_song in clean_video_title:
         score += 0.3
     else:
@@ -195,16 +201,23 @@ def calculate_relevance_score(video_title: str, channel_name: str, artist: str, 
     
     # 3. Check for official indicators in title
     if 'official' in video_title and 'music video' in video_title:
-        score += 0.2
+        score += 0.15
     
-    # 4. Penalize for unwanted content types
+    
+    # 4. Check if artist appears in video title
+    if any(word in clean_video_title for word in clean_artist.split()):
+        score += 0.1
+    
+    # 5. Penalize for unwanted content types
     unwanted_terms = ['lyric', 'lyrics', 'cover', 'tribute', 'fan', 'karaoke', 'instrumental']
     for term in unwanted_terms:
         if term in video_title:
-            score -= 0.4
+            score -= 0.3
             break
     
-   
+    # 6. Bonus for exact matches
+    if f"{clean_artist} {clean_song}" in clean_video_title:
+        score += 0.2
     
     # Ensure score is between 0 and 1
     return max(0.0, min(1.0, score))
