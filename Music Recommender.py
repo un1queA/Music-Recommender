@@ -144,7 +144,7 @@ def youtube_search(artist: str, song: str) -> str:
                 score = calculate_relevance_score(video_title, channel_name, artist, clean_song)
                 
                 # If we find a perfect match, return immediately
-                if score >= 0.9:
+                if score >= 0.7:
                     return f"https://www.youtube.com/watch?v={video_id}"
                 
                 # Track the best result so far
