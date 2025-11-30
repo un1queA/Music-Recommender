@@ -115,81 +115,69 @@ def generate_artist_and_songs(genre):
 def youtube_search(artist: str, song: str) -> str:
     """Search for official music video on YouTube"""
     try:
-        # Clean the inputs
-        artist_lower = artist.lower().strip()
-        song_lower = song.lower().strip()
-        
+        # Clean the song name by removing common symbols and extra words
+        clean_song = re.sub(r'[^\w\s]', '', song).lower()
         # Try multiple search queries to find official video
         search_queries = [
-            f'"{artist}" "{song}" official music video',
             f"{artist} {song} official music video",
-            f"{song} by {artist} official music video",
+            f"{song} {artist} official music video",
             f"{artist} {song} official video",
-            f"{artist} {song} music video",
-            f"{song} {artist} official",
-            f"{artist} {song}",
+            f"{artist} {song} official video",
             f"{song} {artist}",
+            f"{artist} {song}",
         ]
         
+
         best_result = None
         best_score = 0
+       
         
         for query in search_queries:
-            try:
-                results = YoutubeSearch(query, max_results=5).to_dict()
+            results = YoutubeSearch(query, max_results=5).to_dict()
+            
+            for result in results:
+                video_title = result['title'].lower()
+                channel_name = result['channel'].lower()
+                video_id = result['id']
                 
-                for result in results:
-                    video_title = result['title'].lower()
-                    channel_name = result['channel'].lower()
-                    video_id = result['id']
+                # Calculate a relevance score for this result
+                score = calculate_relevance_score(video_title, channel_name, artist, clean_song)
+                
+                # If we find a perfect match, return immediately
+                if score >= 0.7:
+                    return f"https://www.youtube.com/watch?v={video_id}"
+                
+                # Track the best result so far
+                if score > best_score:
+                    best_score = score
+                    best_result = video_id
                     
-                    # Calculate a relevance score for this result
-                    score = calculate_relevance_score(video_title, channel_name, artist_lower, song_lower)
-                    
-                    # Debug info (uncomment to see scoring)
-                    # st.write(f"Query: {query} | Score: {score:.2f} | Title: {video_title[:50]}...")
-                    
-                    # If we find a good match, return immediately
-                    if score >= 0.7:
-                        return f"https://www.youtube.com/watch?v={video_id}"
-                    
-                    # Track the best result so far
-                    if score > best_score:
-                        best_score = score
-                        best_result = video_id
-                        
-            except Exception as query_error:
-                # Continue with next query if one fails
-                continue
         
         # Return the best result if it meets minimum threshold
-        if best_result and best_score >= 0.4:  # Lower threshold to 40%
+        if best_result and best_score >= 0.6:  # At least 60% match
             return f"https://www.youtube.com/watch?v={best_result}"
         else:
             return None
             
     except Exception as e:
-        st.error(f"YouTube search error: {e}")
-        return None
+            st.error(f"YouTube search error: {e}")
+            return None
     
-def calculate_relevance_score(video_title: str, channel_name: str, artist: str, song: str) -> float:
+def calculate_relevance_score(video_title: str, channel_name: str, artist: str, clean_song: str) -> float:
     """Calculate how relevant a YouTube video is to the requested artist and song"""
     score = 0.0
     
-    # Clean the inputs for better matching
-    clean_artist = re.sub(r'[^\w\s]', '', artist).strip()
-    clean_song = re.sub(r'[^\w\s]', '', song).strip()
-    clean_video_title = re.sub(r'[^\w\s]', '', video_title).strip()
     
     # 1. Check if artist is in channel name (very important)
-    if clean_artist in channel_name:
-        score += 0.4
-    elif 'official' in channel_name and any(word in channel_name for word in clean_artist.split()):
+    if clean_artist_name in channel_name:
+        score += 0.5
+    elif 'official' in channel_name or artist in channel_name:
         score += 0.3
-    elif 'vevo' in channel_name:
-        score += 0.2
 
     # 2. Check if song title appears in video title
+    clean_video_title = re.sub(r'[^\w\s]', '', video_title)
+    
+    # Check for exact song title match
     if clean_song in clean_video_title:
         score += 0.3
     else:
@@ -204,24 +192,16 @@ def calculate_relevance_score(video_title: str, channel_name: str, artist: str, 
     
     # 3. Check for official indicators in title
     if 'official' in video_title and 'music video' in video_title:
-        score += 0.15
-    elif 'official' in video_title:
-        score += 0.1
+        score += 0.2
     
-    # 4. Check if artist appears in video title
-    if any(word in clean_video_title for word in clean_artist.split()):
-        score += 0.1
-    
-    # 5. Penalize for unwanted content types
-    unwanted_terms = ['lyric', 'lyrics', 'cover', 'tribute', 'fan', 'karaoke', 'instrumental', 'reaction', 'review']
+    # 4. Penalize for unwanted content types
+    unwanted_terms = ['lyric', 'lyrics', 'cover', 'tribute', 'fan', 'karaoke', 'instrumental']
     for term in unwanted_terms:
         if term in video_title:
-            score -= 0.3
+            score -= 0.4
             break
     
-    # 6. Bonus for exact matches
-    if f"{clean_artist} {clean_song}" in clean_video_title:
-        score += 0.2
+   
     
     # Ensure score is between 0 and 1
     return max(0.0, min(1.0, score))
@@ -276,41 +256,9 @@ def main_app():
     """Main application interface"""
     # Streamlit UI (HOME PAGE)
     st.title("🎵 I AM MUSIC")
-    
-    # Store last used genre for easy re-search
-    if 'last_genre' not in st.session_state:
-        st.session_state.last_genre = ""
-    
-    # Create two columns for better layout
-    col1, col2 = st.columns([3, 1])
-    
-    with col1:
-        genre = st.text_input(
-            "Enter a genre of music:",
-            value=st.session_state.last_genre,
-            placeholder="e.g., pop, rock, jazz, anime..."
-        )
-    
-    with col2:
-        st.markdown("###")  # Vertical spacing
-        search_clicked = st.button("🎵 Search", use_container_width=True)
-    
-    # Quick genre buttons for easy re-searches
-    st.subheader("Quick Genres")
-    quick_genres = ["pop", "rock", "jazz", "hip hop", "electronic", "classical", "country", "R&B", "anime", "k-pop"]
-    
-    # Create buttons in rows
-    cols = st.columns(5)
-    for i, quick_genre in enumerate(quick_genres):
-        with cols[i % 5]:
-            if st.button(quick_genre, key=f"quick_{quick_genre}"):
-                st.session_state.last_genre = quick_genre
-                st.rerun()
+    genre = st.text_input("Enter a genre of music:")
 
-    if genre and search_clicked:
-        # Store the current genre for next time
-        st.session_state.last_genre = genre
-        
+    if genre:
         with st.spinner("Generating recommendations..."):
             # Get response from LangChain
             response = generate_artist_and_songs(genre)
@@ -319,7 +267,7 @@ def main_app():
                 return
                 
             artist = response["artist_suggestion"]
-            songs = [s.strip().replace('- ', '').replace('• ', '').replace('1. ', '').replace('2. ', '').replace('3. ', '') 
+            songs = [s.strip().replace('- ', '').replace('• ', '') 
                     for s in response["song_suggestion"].split('\n') 
                     if s.strip() and len(s.strip()) > 2]
 
@@ -340,21 +288,13 @@ def main_app():
             for song in songs:
                 st.write(f"- {song}")
                 
-                # Get YouTube link for each song with progress indicator
-                with st.spinner(f"Searching for '{song}'..."):
-                    video_url = youtube_search(artist, song)
-                
-                if video_url:
+                # Get YouTube link for each song
+                if video_url := youtube_search(artist, song):  # Fixed: pass both artist and song
                     st.video(video_url)
-                    st.caption(f"🎵 Found video for: {song}")
                 else:
-                    st.warning(f"❌ No video found for '{song}'. Try searching manually on YouTube.")
+                    st.warning("Video not found")
             
             st.success("Done!")
-            
-            # Add button to search same genre again
-            if st.button("🔄 Search Another Artist in Same Genre"):
-                st.rerun()
 
 # =============================================================================
 # APP INITIALIZATION AND MAIN LOGIC
@@ -368,18 +308,8 @@ if 'used_artists' not in st.session_state: #store the used artists in the sessio
 if 'api_key_valid' not in st.session_state:
     st.session_state.api_key_valid = False
 
-# Initialize hide API section flag
-if 'hide_api_section' not in st.session_state:
-    st.session_state.hide_api_section = False
-
-# Setup API key first (this function now handles hiding itself)
+# Setup API key first
 setup_api_key()
-
-# Show API key section toggle if user wants to see it again
-if st.session_state.get('api_key_valid') and st.session_state.get('hide_api_section'):
-    if st.sidebar.button("🔑 Show API Settings"):
-        st.session_state.hide_api_section = False
-        st.rerun()
 
 # Only run main app if API key is valid
 if not st.session_state.api_key_valid:
@@ -387,11 +317,4 @@ if not st.session_state.api_key_valid:
 else:
     main_app()
 
-# Add reset button in sidebar
-if st.sidebar.button("🔄 Reset Used Artists"):
-    st.session_state.used_artists.clear()
-    st.sidebar.success("Artist history cleared!")
-    st.rerun()
 
-# Display current session stats
-st.sidebar.write(f"Artists suggested this session: {len(st.session_state.used_artists)}")
