@@ -111,20 +111,85 @@ def generate_artist_and_songs(genre):
     st.error("Couldn't find a new artist after 5 attempts. Try a different genre or reset memory.")
     return None
 
+def find_artist_official_channel(artist: str) -> str:
+    """Find the official YouTube channel for an artist"""
+    try:
+        # Search for the artist's official channel
+        channel_queries = [
+            f"{artist} official",
+            f"{artist} topic",
+            f"{artist} vevo",
+            f"{artist}"
+        ]
+        
+        for query in channel_queries:
+            results = YoutubeSearch(query, max_results=3).to_dict()
+            for result in results:
+                channel_name = result['channel'].lower()
+                artist_lower = artist.lower()
+                
+                # Strong indicators of official channel
+                if (artist_lower in channel_name or 
+                    'official' in channel_name or 
+                    'vevo' in channel_name or
+                    'topic' in channel_name):
+                    return result['channel']  # Return the channel name
+        
+        return None
+    except Exception as e:
+        st.error(f"Channel search error: {e}")
+        return None
+
+def search_in_channel(artist: str, song: str, channel_name: str) -> str:
+    """Search for a song within a specific channel"""
+    try:
+        search_queries = [
+            f"{song} {artist}",
+            f"{song} official",
+            f"{song} music video",
+            f"{song}"
+        ]
+        
+        for query in search_queries:
+            # Search with channel context
+            full_query = f"{query} {channel_name}"
+            results = YoutubeSearch(full_query, max_results=3).to_dict()
+            
+            for result in results:
+                # Check if the result is from the right channel
+                if result['channel'].lower() == channel_name.lower():
+                    video_title = result['title'].lower()
+                    # Higher confidence since it's from official channel
+                    if not any(term in video_title for term in ['lyric', 'cover', 'karaoke', 'tribute']):
+                        return f"https://www.youtube.com/watch?v={result['id']}"
+        
+        return None
+    except Exception as e:
+        return None
 
 def youtube_search(artist: str, song: str) -> str:
-    """Search for official music video on YouTube"""
+    """Search for official music video on YouTube with channel-first approach"""
     try:
         # Clean the inputs
         artist_lower = artist.lower().strip()
         song_lower = song.lower().strip()
         
-        # Try multiple search queries to find official video
+        # STEP 1: Try to find official channel first
+        official_channel = find_artist_official_channel(artist)
+        
+        # STEP 2: If official channel found, search within that channel
+        if official_channel:
+            st.info(f"🎵 Found official channel: {official_channel}")
+            channel_video = search_in_channel(artist, song, official_channel)
+            if channel_video:
+                return channel_video
+        
+        # STEP 3: Fallback to general search (your original method)
         search_queries = [
             f'"{artist}" "{song}" official music video',
             f"{artist} {song} official music video",
             f"{artist} {song} music video",
-            f"{song} {artist}  music video",
+            f"{song} {artist} music video",
             f"{artist} {song}",
             f"{song} {artist}",
         ]
@@ -143,9 +208,6 @@ def youtube_search(artist: str, song: str) -> str:
                     
                     # Calculate a relevance score for this result
                     score = calculate_relevance_score(video_title, channel_name, artist_lower, song_lower)
-                    
-                    # Debug info (uncomment to see scoring)
-                    # st.write(f"Query: {query} | Score: {score:.2f} | Title: {video_title[:50]}...")
                     
                     # If we find a good match, return immediately
                     if score >= 0.7:
@@ -184,7 +246,8 @@ def calculate_relevance_score(video_title: str, channel_name: str, artist: str, 
         score += 0.4
     elif 'official' in channel_name and any(word in channel_name for word in clean_artist.split()):
         score += 0.3
-
+    elif 'vevo' in channel_name:
+        score += 0.2
 
     # 2. Check if song title appears in video title
     if clean_song in clean_video_title:
@@ -202,7 +265,8 @@ def calculate_relevance_score(video_title: str, channel_name: str, artist: str, 
     # 3. Check for official indicators in title
     if 'official' in video_title and 'music video' in video_title:
         score += 0.15
-    
+    elif 'official' in video_title:
+        score += 0.1
     
     # 4. Check if artist appears in video title
     if any(word in clean_video_title for word in clean_artist.split()):
@@ -304,11 +368,15 @@ def main_app():
             for song in songs:
                 st.write(f"- {song}")
                 
-                # Get YouTube link for each song
-                if video_url := youtube_search(artist, song):  # Fixed: pass both artist and song
+                # Get YouTube link for each song with improved search
+                with st.spinner(f"Searching for '{song}'..."):
+                    video_url = youtube_search(artist, song)
+                
+                if video_url:
                     st.video(video_url)
+                    st.success(f"✅ Found official video for '{song}'")
                 else:
-                    st.warning("Video not found")
+                    st.warning(f"❌ No suitable video found for '{song}'")
             
             st.success("Done!")
 
