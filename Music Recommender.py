@@ -77,19 +77,21 @@ def generate_artist_and_songs(genre):
     
     prompt_template_song = PromptTemplate(
         input_variables=["artist_suggestion"],
-        template="""Give me 3 popular songs from {artist_suggestion} that have official music videos on YouTube. 
+        template="""Give me EXACTLY 3 popular songs from {artist_suggestion} that have official music videos on YouTube. 
         IMPORTANT: 
-        1. Only suggest songs that have official music videos
-        2. Use the original song titles in their native language - DO NOT translate them to English
-        3. Avoid songs that only have lyric videos, live performances, or fan-made content
-        4. Return only the song titles, one per line
-        5. Make sure the songs are well-known and likely to have official videos
+        1. You MUST return exactly 3 songs, no more no less
+        2. Only suggest songs that have official music videos
+        3. Use the original song titles in their native language - DO NOT translate them to English
+        4. Avoid songs that only have lyric videos, live performances, or fan-made content
+        5. Return only the song titles, one per line
+        6. Make sure the songs are well-known and likely to have official videos
+        7. Ensure each song is distinct and has its own official music video
         
         Examples:
-        - If the artist is BTS, use Korean titles like "Dynamite" not translations
-        - If the artist is Bad Bunny, use Spanish titles like "Tití Me Preguntó" not English translations
-        - If the artist is Lisa (Thai singer), use original titles like "LALISA" not translations
-        - If the artist is 宇多田ヒカル, use Japanese titles like "First Love" not translations"""
+        - If the artist is BTS, use Korean titles like "Dynamite", "Butter", "Boy With Luv"
+        - If the artist is Bad Bunny, use Spanish titles like "Tití Me Preguntó", "Me Porto Bonito", "Dákiti"
+        - If the artist is Lisa (Thai singer), use original titles like "LALISA", "MONEY", "SG"
+        - If the artist is 宇多田ヒカル, use Japanese titles like "First Love", "Automatic", "Traveling"""
     )
 
     # Create chains
@@ -158,6 +160,36 @@ def find_artist_official_channel(artist: str) -> str:
     except Exception as e:
         return None  # Silent fail, will use fallback
 
+def parse_duration(duration_str: str) -> int:
+    """Parse YouTube duration string to seconds"""
+    try:
+        if not duration_str:
+            return 0
+            
+        # Handle different duration formats: "3:45", "1:23:45", "45"
+        parts = duration_str.split(':')
+        if len(parts) == 3:  # HH:MM:SS
+            hours, minutes, seconds = int(parts[0]), int(parts[1]), int(parts[2])
+            return hours * 3600 + minutes * 60 + seconds
+        elif len(parts) == 2:  # MM:SS
+            minutes, seconds = int(parts[0]), int(parts[1])
+            return minutes * 60 + seconds
+        elif len(parts) == 1:  # SS only
+            return int(parts[0])
+        else:
+            return 0
+    except:
+        return 0
+
+def is_appropriate_duration(duration_str: str) -> bool:
+    """Check if video duration is appropriate for music video (2-10 minutes)"""
+    duration_seconds = parse_duration(duration_str)
+    
+    # Ideal music video duration: 2-10 minutes (120-600 seconds)
+    # Too short: teasers, shorts (< 2 minutes)
+    # Too long: compilations, live concerts (> 10 minutes)
+    return 120 <= duration_seconds <= 600
+
 def search_in_channel(artist: str, song: str, channel_name: str) -> str:
     """Search for a song within a specific channel"""
     try:
@@ -180,16 +212,25 @@ def search_in_channel(artist: str, song: str, channel_name: str) -> str:
                 # Check if the result is from the right channel
                 if result['channel'].lower() == channel_name.lower():
                     video_title = result['title'].lower()
+                    duration = result.get('duration', '')
+                    
+                    # Check duration first
+                    if not is_appropriate_duration(duration):
+                        continue
+                        
                     # Higher confidence since it's from official channel
-                    if not any(term in video_title for term in ['lyric', 'cover', 'karaoke', 'tribute', 'fanmade']):
+                    if not any(term in video_title for term in ['lyric', 'cover', 'karaoke', 'tribute', 'fanmade', 'teaser', 'short', 'compilation']):
                         return f"https://www.youtube.com/watch?v={result['id']}"
         
         return None
     except Exception as e:
         return None
 
-def youtube_search(artist: str, song: str) -> str:
+def youtube_search(artist: str, song: str, used_video_ids: set = None) -> str:
     """Search for official music video on YouTube with channel-first approach"""
+    if used_video_ids is None:
+        used_video_ids = set()
+        
     try:
         # Use original song title - don't lowercase or clean non-English characters
         artist_lower = artist.lower().strip()
@@ -197,14 +238,12 @@ def youtube_search(artist: str, song: str) -> str:
         
         # STEP 1: Try to find official channel first
         official_channel = find_artist_official_channel(artist)
-        official_video_found = False
         
         # STEP 2: If official channel found, search within that channel
         if official_channel:
             st.info(f"🎵 Found official channel: {official_channel}")
             channel_video = search_in_channel(artist, song, official_channel)
-            if channel_video:
-                official_video_found = True
+            if channel_video and channel_video.split('v=')[1] not in used_video_ids:
                 return channel_video
         
         # STEP 3: Fallback to comprehensive search with multiple strategies
@@ -223,20 +262,28 @@ def youtube_search(artist: str, song: str) -> str:
         
         best_official_result = None
         best_fallback_result = None
+        best_low_quality_result = None
         best_official_score = 0
         best_fallback_score = 0
+        best_low_quality_score = 0
         
         for query in search_queries:
             try:
-                results = YoutubeSearch(query, max_results=8).to_dict()  # More results per query
+                results = YoutubeSearch(query, max_results=10).to_dict()  # More results per query
                 
                 for result in results:
-                    video_title = result['title'].lower()
-                    channel_name = result['channel'].lower()
                     video_id = result['id']
                     
+                    # Skip if we've already used this video
+                    if video_id in used_video_ids:
+                        continue
+                        
+                    video_title = result['title'].lower()
+                    channel_name = result['channel'].lower()
+                    duration = result.get('duration', '')
+                    
                     # Calculate a relevance score for this result
-                    score = calculate_relevance_score(video_title, channel_name, artist_lower, song)
+                    score = calculate_relevance_score(video_title, channel_name, artist_lower, song, duration)
                     
                     # Check if this is from official channel (highest priority)
                     is_official_channel = (
@@ -251,28 +298,31 @@ def youtube_search(artist: str, song: str) -> str:
                         any(word in video_title for word in artist_lower.split())
                     )
                     
-                    # STRONG penalty for covers and unwanted content
-                    unwanted_penalty = 0
-                    unwanted_terms = ['cover', 'tribute', 'fan', 'karaoke', 'lyric', 'lyrics']
-                    for term in unwanted_terms:
-                        if term in video_title:
-                            unwanted_penalty = 0.5  # Strong penalty
-                            break
+                    # Check for unwanted content
+                    has_unwanted_content = any(term in video_title for term in 
+                                            ['cover', 'tribute', 'fan', 'karaoke', 'lyric', 'lyrics', 'compilation'])
                     
-                    final_score = score - unwanted_penalty
-                    
-                    # Prioritize official channel videos
-                    if is_official_channel and final_score > best_official_score:
-                        best_official_score = final_score
+                    # Tier 1: Official channel, appropriate duration, no unwanted content
+                    if (is_official_channel and not has_unwanted_content and 
+                        is_appropriate_duration(duration) and score > best_official_score):
+                        best_official_score = score
                         best_official_result = video_id
                     
-                    # Fallback: same artist singing the same song (even if not official)
-                    elif is_same_artist and final_score > best_fallback_score and unwanted_penalty == 0:
-                        best_fallback_score = final_score
+                    # Tier 2: Same artist, appropriate duration, no unwanted content (may not be official)
+                    elif (is_same_artist and not has_unwanted_content and 
+                          is_appropriate_duration(duration) and score > best_fallback_score):
+                        best_fallback_score = score
                         best_fallback_result = video_id
                     
-                    # If we find a very good official match, return immediately
-                    if is_official_channel and final_score >= 0.8:
+                    # Tier 3: Same artist singing same song (lowest priority - may have issues)
+                    elif (is_same_artist and score > best_low_quality_score and
+                          is_appropriate_duration(duration)):
+                        best_low_quality_score = score
+                        best_low_quality_result = video_id
+                    
+                    # If we find a perfect match, return immediately
+                    if (is_official_channel and not has_unwanted_content and 
+                        is_appropriate_duration(duration) and score >= 0.9):
                         return f"https://www.youtube.com/watch?v={video_id}"
                         
             except Exception as query_error:
@@ -280,19 +330,36 @@ def youtube_search(artist: str, song: str) -> str:
                 continue
         
         # Return priority: official channel videos first, then same artist fallbacks
-        if best_official_result and best_official_score >= 0.5:
+        if best_official_result and best_official_score >= 0.6:
             return f"https://www.youtube.com/watch?v={best_official_result}"
-        elif best_fallback_result and best_fallback_score >= 0.4:
-            st.info(f"🎵 Found performance by {artist} (may not be official)")
+        elif best_fallback_result and best_fallback_score >= 0.5:
+            st.info(f"🎵 Found performance by {artist}")
             return f"https://www.youtube.com/watch?v={best_fallback_result}"
+        elif best_low_quality_result and best_low_quality_score >= 0.4:
+            st.info(f"🎵 Found video for '{song}' by {artist}")
+            return f"https://www.youtube.com/watch?v={best_low_quality_result}"
         else:
+            # Last resort: return the first result that matches the artist and song
+            try:
+                results = YoutubeSearch(f"{artist} {song}", max_results=5).to_dict()
+                for result in results:
+                    video_id = result['id']
+                    if video_id not in used_video_ids:
+                        video_title = result['title'].lower()
+                        if (artist_lower in video_title or 
+                            any(word in video_title for word in artist_lower.split())):
+                            st.info(f"🎵 Found potential match for '{song}'")
+                            return f"https://www.youtube.com/watch?v={video_id}"
+            except:
+                pass
+                
             return None
             
     except Exception as e:
         st.error(f"YouTube search error: {e}")
         return None
     
-def calculate_relevance_score(video_title: str, channel_name: str, artist: str, song: str) -> float:
+def calculate_relevance_score(video_title: str, channel_name: str, artist: str, song: str, duration: str = "") -> float:
     """Calculate how relevant a YouTube video is to the requested artist and song"""
     score = 0.0
     
@@ -338,6 +405,18 @@ def calculate_relevance_score(video_title: str, channel_name: str, artist: str, 
     # 5. Bonus for exact matches
     if f"{clean_artist} {song_lower}" in video_title:
         score += 0.25
+    
+    # 6. Duration bonus/penalty
+    if duration:
+        duration_seconds = parse_duration(duration)
+        if 180 <= duration_seconds <= 300:  # Ideal 3-5 minutes
+            score += 0.2
+        elif 120 <= duration_seconds <= 600:  # Acceptable 2-10 minutes
+            score += 0.1
+        elif duration_seconds < 120:  # Too short (teasers)
+            score -= 0.3
+        elif duration_seconds > 600:  # Too long (compilations)
+            score -= 0.2
     
     # Ensure score is between 0 and 1
     return max(0.0, min(1.0, score))
@@ -403,9 +482,17 @@ def main_app():
                 return
                 
             artist = response["artist_suggestion"]
-            songs = [s.strip().replace('- ', '').replace('• ', '') 
-                    for s in response["song_suggestion"].split('\n') 
-                    if s.strip() and len(s.strip()) > 2]
+            raw_songs = [s.strip().replace('- ', '').replace('• ', '') 
+                        for s in response["song_suggestion"].split('\n') 
+                        if s.strip() and len(s.strip()) > 2]
+            
+            # Ensure we have exactly 3 songs
+            songs = raw_songs[:3]  # Take only first 3 songs
+            if len(songs) < 3:
+                st.warning(f"⚠️ Only found {len(songs)} songs. Trying to get exactly 3...")
+                # If GPT didn't provide 3 songs, we'll work with what we have
+                while len(songs) < 3:
+                    songs.append(f"Song {len(songs) + 1}")  # Placeholder
 
     #The code processes it as:
     #split('\n') creates: ["- Song 1", "• Song 2", "Song 3", "", "- Short"]
@@ -422,24 +509,49 @@ def main_app():
             
             st.subheader("Recommended Songs:")
             videos_found = 0
-            for song in songs:
-                st.write(f"- {song}")
+            used_video_ids = set()  # Track used videos to avoid duplicates
+            
+            for i, song in enumerate(songs):
+                st.write(f"{i+1}. {song}")
                 
                 # Get YouTube link for each song with improved search
-                with st.spinner(f"Searching for '{song}'..."):
-                    video_url = youtube_search(artist, song)
+                with st.spinner(f"Searching for '{song}' ({i+1}/3)..."):
+                    video_url = youtube_search(artist, song, used_video_ids)
                 
                 if video_url:
+                    # Extract video ID to track duplicates
+                    video_id = video_url.split('v=')[1]
+                    used_video_ids.add(video_id)
+                    
                     st.video(video_url)
                     st.success(f"✅ Found video for '{song}'")
                     videos_found += 1
                 else:
-                    st.warning(f"❌ No suitable video found for '{song}'")
+                    st.info(f"🔍 Still searching for '{song}'...")
+                    # Try one more time with simpler search
+                    try:
+                        results = YoutubeSearch(f"{artist} {song}", max_results=3).to_dict()
+                        for result in results:
+                            video_id = result['id']
+                            if video_id not in used_video_ids:
+                                video_url = f"https://www.youtube.com/watch?v={video_id}"
+                                used_video_ids.add(video_id)
+                                st.video(video_url)
+                                st.success(f"✅ Found alternative video for '{song}'")
+                                videos_found += 1
+                                break
+                        else:
+                            st.warning(f"🤔 Having trouble finding '{song}'. Try searching manually.")
+                    except:
+                        st.warning(f"🤔 Having trouble finding '{song}'. Try searching manually.")
             
-            if videos_found > 0:
-                st.success(f"Done! Found {videos_found} out of {len(songs)} videos.")
+            if videos_found == 3:
+                st.balloons()
+                st.success("🎉 Perfect! Found all 3 videos!")
+            elif videos_found > 0:
+                st.success(f"✅ Found {videos_found} out of 3 videos!")
             else:
-                st.error("No videos found. Try a different genre or artist.")
+                st.info("💡 Some videos couldn't be found automatically. Try the manual search suggestions above.")
 
 # =============================================================================
 # APP INITIALIZATION AND MAIN LOGIC
