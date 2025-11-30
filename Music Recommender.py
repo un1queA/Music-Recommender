@@ -40,7 +40,7 @@ def clean_artist_name(artist):
 def initialize_llm():
     """Initialize the LLM with the current API key"""
     try:
-        from langchain_openai import ChatOpenAI
+        from langchain.chat_models import ChatOpenAI
         llm = ChatOpenAI(
             model="gpt-4", 
             temperature=1.0,
