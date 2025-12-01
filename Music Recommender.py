@@ -87,11 +87,6 @@ def generate_artist_and_songs(genre):
         6. Make sure the songs are well-known and likely to have official videos
         7. Ensure each song is distinct and has its own official music video
         
-        Examples:
-        - If the artist is BTS, use Korean titles like "Dynamite", "Butter", "Boy With Luv"
-        - If the artist is Bad Bunny, use Spanish titles like "Tití Me Preguntó", "Me Porto Bonito", "Dákiti"
-        - If the artist is Lisa (Thai singer), use original titles like "LALISA", "MONEY", "SG"
-        - If the artist is 宇多田ヒカル, use Japanese titles like "First Love", "Automatic", "Traveling"""
     )
 
     # Create chains
@@ -573,3 +568,4 @@ if not st.session_state.api_key_valid:
     st.info("🔑 Please enter your OpenAI API key in the sidebar to use the app.")
 else:
     main_app()
+
