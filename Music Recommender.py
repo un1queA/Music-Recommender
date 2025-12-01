@@ -85,7 +85,7 @@ def generate_artist_and_songs(genre):
         4. Avoid songs that only have lyric videos, live performances, or fan-made content
         5. Return only the song titles, one per line
         6. Make sure the songs are well-known and likely to have official videos
-        7. Ensure each song is distinct and has its own official music video
+        7. Ensure each song is distinct and has its own official music video """
         
     )
 
@@ -568,4 +568,5 @@ if not st.session_state.api_key_valid:
     st.info("🔑 Please enter your OpenAI API key in the sidebar to use the app.")
 else:
     main_app()
+
 
