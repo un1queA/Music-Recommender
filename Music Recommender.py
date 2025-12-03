@@ -541,7 +541,6 @@ def main_app():
                         st.warning(f"🤔 Having trouble finding '{song}'. Try searching manually.")
             
             if videos_found == 3:
-                st.balloons()
                 st.success("🎉 Perfect! Found all 3 videos!")
             elif videos_found > 0:
                 st.success(f"✅ Found {videos_found} out of 3 videos!")
@@ -568,5 +567,6 @@ if not st.session_state.api_key_valid:
     st.info("🔑 Please enter your OpenAI API key in the sidebar to use the app.")
 else:
     main_app()
+
 
 
