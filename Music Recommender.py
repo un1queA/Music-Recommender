@@ -1,3 +1,28 @@
+# prerequisites:
+# pip install langchain
+# pip install openai
+# pip install langchain -U langchain-community
+# pip install youtube-search
+# pip install httpx==0.24.1
+# pip install streamlit
+# pip install streamlit -U streamlit
+# pip install -U langchain-openai
+# Run with this command ==> python -m streamlit run IAMUSIC2.py --logger.level=error
+
+import streamlit as st
+import os
+import logging
+import re
+from youtube_search import YoutubeSearch
+import time
+
+# Set up logging
+logging.getLogger("streamlit").setLevel(logging.WARNING)
+
+# =============================================================================
+# BACKEND FUNCTIONS - IMPROVED VERSION
+# =============================================================================
+
 # =============================================================================
 # IMPROVED BACKEND FUNCTIONS
 # =============================================================================
