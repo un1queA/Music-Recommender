@@ -221,8 +221,8 @@ def generate_artist_and_songs(genre):
     Returns a dict with 'artist_info' and 'song_list'.
     """
     from langchain.prompts import PromptTemplate
-    from langchain.chains import LLMChain, SequentialChain
-
+    from langchain.chains import LLMChain
+    
     llm = initialize_llm()
     if not llm:
         return None
@@ -240,15 +240,50 @@ def generate_artist_and_songs(genre):
         REQUIREMENTS:
         1. The artist must have an active official YouTube channel with music videos.
         2. The real name is CRITICAL for accurate searching.
-        3. Use their most recognized stage name."""
+        3. Use their most recognized stage name.
+
+        Example:
+        Stage Name: LiSA
+        Real Name: Risa Oribe
+        """
     )
+
+    # Create and run artist chain
+    artist_chain = LLMChain(
+        llm=llm,
+        prompt=prompt_template_artist,
+        output_key="artist_raw"
+    )
+    
+    try:
+        artist_response = artist_chain.run({"genre": genre})
+    except Exception as e:
+        st.error(f"Failed to generate artist: {e}")
+        return None
+
+    # Parse artist info
+    stage_name, real_name = None, None
+    for line in artist_response.strip().split('\n'):
+        line = line.strip()
+        if line.startswith('Stage Name:'):
+            stage_name = line.replace('Stage Name:', '').strip()
+        elif line.startswith('Real Name:'):
+            real_name = line.replace('Real Name:', '').strip()
+    
+    if not stage_name:
+        st.error("Could not parse artist information from the response.")
+        return None
+    
+    # Store artist info
+    artist_info = {
+        'stage_name': stage_name,
+        'real_name': real_name if real_name else "Not widely published"
+    }
 
     # NEW PROMPT: Asks for 3 songs with original and translated titles
     prompt_template_song = PromptTemplate(
-        input_variables=["artist_info"],
-        template="""Based on the artist information below, give me EXACTLY 3 of their popular songs that have official music videos.
-
-        Artist Info: {artist_info}
+        input_variables=["artist_name"],
+        template="""Based on the artist: {artist_name}, give me EXACTLY 3 of their popular songs that have official music videos.
 
         For EACH song, provide the original title and its English translation/full title.
         Use this EXACT format for your entire response:
@@ -260,72 +295,79 @@ def generate_artist_and_songs(genre):
         IMPORTANT:
         - Only output the 3 lines above, nothing else.
         - The 'Original' title must be exactly as it appears officially (e.g., 紅蓮華 for LiSA's Gurenge).
-        - The 'Translation' should be the common English name or a direct translation (e.g., Gurenge or Crimson Lotus)."""
+        - The 'Translation' should be the common English name or a direct translation (e.g., Gurenge or Crimson Lotus).
+
+        Example for LiSA:
+        1. Original: 紅蓮華 | Translation: Gurenge (Crimson Lotus)
+        2. Original: 炎 | Translation: Homura (Flame)
+        3. Original: ADAMAS | Translation: ADAMAS
+        """
     )
 
-    # Create chains individually
-    artist_chain = LLMChain(
-        llm=llm,
-        prompt=prompt_template_artist,
-        output_key="artist_raw"
-    )
-    
+    # Create and run song chain
     song_chain = LLMChain(
         llm=llm,
         prompt=prompt_template_song,
         output_key="songs_raw"
     )
+    
+    try:
+        # Use stage name in the prompt
+        songs_response = song_chain.run({"artist_name": stage_name})
+    except Exception as e:
+        st.error(f"Failed to generate songs: {e}")
+        return None
 
-    # Create SequentialChain with explicit parameters - FIXED VERSION
-    chain = SequentialChain(
-        input_variables=["genre"],
-        output_variables=["artist_raw", "songs_raw"],
-        chains=[artist_chain, song_chain],
-        verbose=False
-    )
-
-    max_attempts = 3
-    for attempt in range(max_attempts):
+    # Parse songs
+    song_list = []
+    for line in songs_response.strip().split('\n'):
+        line = line.strip()
+        # Match lines like "1. Original: ... | Translation: ..."
+        if 'Original:' in line and 'Translation:' in line:
+            # Extract the part after the number and period
+            content_part = line.split('.', 1)[-1] if '.' in line else line
+            parts = content_part.split('|')
+            if len(parts) == 2:
+                original = parts[0].replace('Original:', '').strip()
+                translation = parts[1].replace('Translation:', '').strip()
+                song_list.append({'original_title': original, 'english_title': translation})
+    
+    # Check if we got exactly 3 songs
+    if len(song_list) != 3:
+        st.warning(f"Got {len(song_list)} songs instead of 3. Trying again...")
+        # Try one more time with more specific prompt
         try:
-            response = chain({"genre": genre})
-            # --- PARSE ARTIST INFO ---
-            artist_text = response["artist_raw"].strip()
-            stage_name, real_name = None, None
-            for line in artist_text.split('\n'):
-                line = line.strip()
-                if line.startswith('Stage Name:'):
-                    stage_name = line.replace('Stage Name:', '').strip()
-                elif line.startswith('Real Name:'):
-                    real_name = line.replace('Real Name:', '').strip()
-            if not stage_name:
-                continue  # Parsing failed, try again
-            artist_info = {'stage_name': stage_name, 'real_name': real_name}
-
-            # --- PARSE SONG INFO ---
-            songs_text = response["songs_raw"].strip()
+            retry_prompt = PromptTemplate(
+                input_variables=["artist_name"],
+                template="""For {artist_name}, give EXACTLY 3 songs with official music videos in format:
+                Original: [title] | Translation: [english]
+                One per line, numbered 1-3. ONLY 3 songs."""
+            )
+            retry_chain = LLMChain(llm=llm, prompt=retry_prompt)
+            retry_response = retry_chain.run({"artist_name": stage_name})
+            
+            # Parse retry response
             song_list = []
-            for line in songs_text.split('\n'):
+            lines = retry_response.strip().split('\n')
+            for line in lines[:3]:  # Take only first 3
                 line = line.strip()
-                # Match lines like "1. Original: ... | Translation: ..."
                 if 'Original:' in line and 'Translation:' in line:
-                    # Extract the part after the number and period
                     content_part = line.split('.', 1)[-1] if '.' in line else line
                     parts = content_part.split('|')
                     if len(parts) == 2:
                         original = parts[0].replace('Original:', '').strip()
                         translation = parts[1].replace('Translation:', '').strip()
                         song_list.append({'original_title': original, 'english_title': translation})
-            # Return only if we successfully parsed exactly 3 songs
-            if len(song_list) == 3:
-                return {
-                    "artist_info": artist_info,  # This is now a dict
-                    "song_list": song_list  # This is now a list of dicts
-                }
-        except Exception as e:
-            # Log error but continue trying
-            st.warning(f"Attempt {attempt + 1} failed. Retrying...")
-            continue
-    return None  # Failed all attempts
+        except:
+            pass
+    
+    if len(song_list) == 3:
+        return {
+            "artist_info": artist_info,
+            "song_list": song_list
+        }
+    
+    return None
 # =============================================================================
 # FRONTEND FUNCTIONS - UPDATED
 # =============================================================================
@@ -474,4 +516,5 @@ if not st.session_state.api_key_valid:
     st.info("🔑 Please enter your OpenAI API key in the sidebar to use the app.")
 else:
     main_app()
+
 
