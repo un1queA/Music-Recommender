@@ -20,7 +20,23 @@ import time
 logging.getLogger("streamlit").setLevel(logging.WARNING)
 
 # =============================================================================
-# BACKEND FUNCTIONS - IMPROVED VERSION
+# INITIALIZATION
+# =============================================================================
+
+if 'used_artists' not in st.session_state:
+    st.session_state.used_artists = set()
+
+if 'used_songs' not in st.session_state:
+    st.session_state.used_songs = {}
+
+if 'api_key_valid' not in st.session_state:
+    st.session_state.api_key_valid = False
+
+if 'hide_api_section' not in st.session_state:
+    st.session_state.hide_api_section = False
+
+# =============================================================================
+# BACKEND FUNCTIONS
 # =============================================================================
 
 def validate_api_key(api_key):
@@ -47,6 +63,220 @@ def initialize_llm():
     except Exception as e:
         st.error(f"Failed to initialize OpenAI: {e}")
         return None
+
+def generate_search_terms(original, english, unique_phrase):
+    """Generate multiple search strategies for a song"""
+    search_sets = []
+    
+    # Strategy 1: Exact original title + artist
+    search_sets.append({
+        'name': 'Exact Original',
+        'queries': [
+            f'"{original}" official music video',
+            f'"{original}" 公式MV',
+            f'"{original}" MV'
+        ],
+        'weight': 1.0
+    })
+    
+    # Strategy 2: English title if different
+    if english and english.lower() != original.lower():
+        search_sets.append({
+            'name': 'English Title',
+            'queries': [
+                f'"{english}" official music video',
+                f'"{english}" MV'
+            ],
+            'weight': 0.8
+        })
+    
+    # Strategy 3: Unique phrase search
+    search_sets.append({
+        'name': 'Unique Phrase',
+        'queries': [
+            f'"{unique_phrase}"',
+            f'{unique_phrase} official'
+        ],
+        'weight': 0.9
+    })
+    
+    # Strategy 4: Combination searches
+    words = unique_phrase.split()[:4]  # First 4 words of unique phrase
+    if words:
+        search_sets.append({
+            'name': 'Key Terms',
+            'queries': [f'"{original}" {" ".join(words)}'],
+            'weight': 0.7
+        })
+    
+    return search_sets
+
+def calculate_comprehensive_score(title, description, channel, artist_info, song_info, query):
+    """Calculate score with multiple verification layers"""
+    score = 0.0
+    max_score = 1.0
+    
+    title_lower = title.lower()
+    desc_lower = (description or '').lower()
+    channel_lower = channel.lower()
+    
+    # 1. Artist verification (30%)
+    artist_indicators = [
+        artist_info['stage_name'].lower(),
+        artist_info['real_name'].lower() if artist_info['real_name'] != "Not widely published" else ""
+    ]
+    
+    artist_found = False
+    for indicator in artist_indicators:
+        if indicator and indicator in title_lower:
+            score += 0.15
+            artist_found = True
+        if indicator and indicator in channel_lower:
+            score += 0.15
+            artist_found = True
+    
+    if not artist_found:
+        return 0.0  # Reject if artist not found
+    
+    # 2. Song title verification (40%)
+    # Check original title
+    if song_info['original'].lower() in title_lower:
+        score += 0.4
+    # Check English title
+    elif song_info['english'].lower() in title_lower:
+        score += 0.35
+    else:
+        # Check for partial matches
+        original_words = set(song_info['original'].lower().split())
+        title_words = set(title_lower.split())
+        common_words = original_words.intersection(title_words)
+        if common_words:
+            score += len(common_words) * 0.1
+    
+    # 3. Unique phrase verification (20%)
+    if song_info['unique_phrase'].lower() in desc_lower:
+        score += 0.2
+    elif any(word.lower() in desc_lower for word in song_info['unique_phrase'].split()[:3]):
+        score += 0.1
+    
+    # 4. Official indicators (10%)
+    official_terms = ['official', 'vevo', 'music video', 'mv', '公式']
+    for term in official_terms:
+        if term in title_lower or term in desc_lower:
+            score += 0.05
+            break
+    
+    # 5. Penalties for unwanted content
+    unwanted = ['cover', 'tribute', 'reaction', 'lyrics', 'karaoke', 'instrumental', 'fan']
+    for term in unwanted:
+        if term in title_lower:
+            score -= 0.3
+            break
+    
+    # 6. View count bonus (if available in description)
+    if 'million' in desc_lower or '000,000' in desc_lower:
+        score += 0.05
+    
+    return min(max_score, max(0.0, score))
+
+def find_and_verify_video(artist_info, song_info, search_strategies):
+    """Find and VERIFY a video using multiple search strategies"""
+    all_results = []
+    
+    for strategy in search_strategies:
+        for query in strategy['queries']:
+            try:
+                # Add artist name to query for context
+                enhanced_query = f"{query} {artist_info['stage_name']}"
+                results = YoutubeSearch(enhanced_query, max_results=10).to_dict()
+                
+                for result in results:
+                    score = calculate_comprehensive_score(
+                        result['title'],
+                        result.get('description', ''),
+                        result['channel'],
+                        artist_info,
+                        song_info,
+                        query
+                    )
+                    
+                    if score >= 0.7:  # Good match threshold
+                        result['strategy'] = strategy['name']
+                        result['query'] = query
+                        result['score'] = score
+                        all_results.append(result)
+                        
+            except Exception:
+                continue
+    
+    # Sort by score and remove duplicates
+    if all_results:
+        # Remove duplicates by video ID
+        seen_ids = set()
+        unique_results = []
+        for result in sorted(all_results, key=lambda x: x['score'], reverse=True):
+            if result['id'] not in seen_ids:
+                seen_ids.add(result['id'])
+                unique_results.append(result)
+        
+        # Return best result if score is high enough
+        if unique_results and unique_results[0]['score'] >= 0.85:
+            return unique_results[0]
+    
+    return None
+
+def get_song_video_with_verification(artist_info, song):
+    """Main function to get verified video for a song"""
+    # Generate search strategies for this song
+    search_strategies = generate_search_terms(
+        song['original'], 
+        song['english'], 
+        song['unique_phrase']
+    )
+    
+    # First attempt: Normal search
+    video = find_and_verify_video(artist_info, song, search_strategies)
+    
+    if video:
+        return {
+            'video_id': video['id'],
+            'title': video['title'],
+            'channel': video['channel'],
+            'strategy': video.get('strategy', 'Unknown'),
+            'score': video.get('score', 0),
+            'verified': video.get('score', 0) >= 0.85
+        }
+    
+    # Second attempt: If artist has known YouTube channel
+    if artist_info.get('youtube_channel') and artist_info['youtube_channel'] != "Unknown":
+        try:
+            channel_query = f"{song['original']} {artist_info['youtube_channel']}"
+            results = YoutubeSearch(channel_query, max_results=5).to_dict()
+            
+            for result in results:
+                if artist_info['youtube_channel'].lower() in result['channel'].lower():
+                    score = calculate_comprehensive_score(
+                        result['title'],
+                        result.get('description', ''),
+                        result['channel'],
+                        artist_info,
+                        song,
+                        channel_query
+                    )
+                    
+                    if score >= 0.7:
+                        return {
+                            'video_id': result['id'],
+                            'title': result['title'],
+                            'channel': result['channel'],
+                            'strategy': 'Channel Search',
+                            'score': score,
+                            'verified': score >= 0.85
+                        }
+        except Exception:
+            pass
+    
+    return None
 
 def generate_artist_and_songs(genre):
     """Generate artist and songs with strict validation"""
@@ -133,8 +363,7 @@ def generate_artist_and_songs(genre):
                         song_list.append({
                             'original': original,
                             'english': english,
-                            'unique_phrase': unique_phrase,
-                            'search_terms': self.generate_search_terms(original, english, unique_phrase)
+                            'unique_phrase': unique_phrase
                         })
             
             if len(song_list) == 3:
@@ -157,224 +386,6 @@ def generate_artist_and_songs(genre):
     st.error("Couldn't find a suitable artist after 5 attempts.")
     return None
 
-def generate_search_terms(original, english, unique_phrase):
-    """Generate multiple search strategies for a song"""
-    search_sets = []
-    
-    # Strategy 1: Exact original title + artist
-    search_sets.append({
-        'name': 'Exact Original',
-        'queries': [
-            f'"{original}" official music video',
-            f'"{original}" 公式MV',
-            f'"{original}" MV'
-        ],
-        'weight': 1.0
-    })
-    
-    # Strategy 2: English title if different
-    if english and english.lower() != original.lower():
-        search_sets.append({
-            'name': 'English Title',
-            'queries': [
-                f'"{english}" official music video',
-                f'"{english}" MV'
-            ],
-            'weight': 0.8
-        })
-    
-    # Strategy 3: Unique phrase search
-    search_sets.append({
-        'name': 'Unique Phrase',
-        'queries': [
-            f'"{unique_phrase}"',
-            f'{unique_phrase} official'
-        ],
-        'weight': 0.9
-    })
-    
-    # Strategy 4: Combination searches
-    words = unique_phrase.split()[:4]  # First 4 words of unique phrase
-    if words:
-        search_sets.append({
-            'name': 'Key Terms',
-            'queries': [f'"{original}" {" ".join(words)}'],
-            'weight': 0.7
-        })
-    
-    return search_sets
-
-def find_and_verify_video(artist_info, song_info, search_strategies):
-    """Find and VERIFY a video using multiple search strategies"""
-    all_results = []
-    
-    for strategy in search_strategies:
-        for query in strategy['queries']:
-            try:
-                # Add artist name to query for context
-                enhanced_query = f"{query} {artist_info['stage_name']}"
-                results = YoutubeSearch(enhanced_query, max_results=10).to_dict()
-                
-                for result in results:
-                    score = calculate_comprehensive_score(
-                        result['title'],
-                        result.get('description', ''),
-                        result['channel'],
-                        artist_info,
-                        song_info,
-                        query
-                    )
-                    
-                    if score >= 0.7:  # Good match threshold
-                        result['strategy'] = strategy['name']
-                        result['query'] = query
-                        result['score'] = score
-                        all_results.append(result)
-                        
-            except Exception:
-                continue
-    
-    # Sort by score and remove duplicates
-    if all_results:
-        # Remove duplicates by video ID
-        seen_ids = set()
-        unique_results = []
-        for result in sorted(all_results, key=lambda x: x['score'], reverse=True):
-            if result['id'] not in seen_ids:
-                seen_ids.add(result['id'])
-                unique_results.append(result)
-        
-        # Return best result if score is high enough
-        if unique_results and unique_results[0]['score'] >= 0.85:
-            return unique_results[0]
-    
-    return None
-
-def calculate_comprehensive_score(title, description, channel, artist_info, song_info, query):
-    """Calculate score with multiple verification layers"""
-    score = 0.0
-    max_score = 1.0
-    
-    title_lower = title.lower()
-    desc_lower = (description or '').lower()
-    channel_lower = channel.lower()
-    
-    # 1. Artist verification (30%)
-    artist_indicators = [
-        artist_info['stage_name'].lower(),
-        artist_info['real_name'].lower() if artist_info['real_name'] != "Not widely published" else ""
-    ]
-    
-    artist_found = False
-    for indicator in artist_indicators:
-        if indicator and indicator in title_lower:
-            score += 0.15
-            artist_found = True
-        if indicator and indicator in channel_lower:
-            score += 0.15
-            artist_found = True
-    
-    if not artist_found:
-        return 0.0  # Reject if artist not found
-    
-    # 2. Song title verification (40%)
-    # Check original title
-    if song_info['original'].lower() in title_lower:
-        score += 0.4
-    # Check English title
-    elif song_info['english'].lower() in title_lower:
-        score += 0.35
-    else:
-        # Check for partial matches
-        original_words = set(song_info['original'].lower().split())
-        title_words = set(title_lower.split())
-        common_words = original_words.intersection(title_words)
-        if common_words:
-            score += len(common_words) * 0.1
-    
-    # 3. Unique phrase verification (20%)
-    if song_info['unique_phrase'].lower() in desc_lower:
-        score += 0.2
-    elif any(word.lower() in desc_lower for word in song_info['unique_phrase'].split()[:3]):
-        score += 0.1
-    
-    # 4. Official indicators (10%)
-    official_terms = ['official', 'vevo', 'music video', 'mv', '公式']
-    for term in official_terms:
-        if term in title_lower or term in desc_lower:
-            score += 0.05
-            break
-    
-    # 5. Penalties for unwanted content
-    unwanted = ['cover', 'tribute', 'reaction', 'lyrics', 'karaoke', 'instrumental', 'fan']
-    for term in unwanted:
-        if term in title_lower:
-            score -= 0.3
-            break
-    
-    # 6. View count bonus (if available in description)
-    if 'million' in desc_lower or '000,000' in desc_lower:
-        score += 0.05
-    
-    return min(max_score, max(0.0, score))
-
-def get_song_video_with_verification(artist_info, song):
-    """Main function to get verified video for a song"""
-    # Try multiple search strategies
-    search_strategies = song.get('search_terms', generate_search_terms(
-        song['original'], 
-        song['english'], 
-        song['unique_phrase']
-    ))
-    
-    # First attempt: Normal search
-    video = find_and_verify_video(artist_info, song, search_strategies)
-    
-    if video:
-        return {
-            'video_id': video['id'],
-            'title': video['title'],
-            'channel': video['channel'],
-            'strategy': video.get('strategy', 'Unknown'),
-            'score': video.get('score', 0),
-            'verified': video.get('score', 0) >= 0.85
-        }
-    
-    # Second attempt: If artist has known YouTube channel
-    if artist_info.get('youtube_channel') and artist_info['youtube_channel'] != "Unknown":
-        try:
-            channel_query = f"{song['original']} {artist_info['youtube_channel']}"
-            results = YoutubeSearch(channel_query, max_results=5).to_dict()
-            
-            for result in results:
-                if artist_info['youtube_channel'].lower() in result['channel'].lower():
-                    score = calculate_comprehensive_score(
-                        result['title'],
-                        result.get('description', ''),
-                        result['channel'],
-                        artist_info,
-                        song,
-                        channel_query
-                    )
-                    
-                    if score >= 0.7:
-                        return {
-                            'video_id': result['id'],
-                            'title': result['title'],
-                            'channel': result['channel'],
-                            'strategy': 'Channel Search',
-                            'score': score,
-                            'verified': score >= 0.85
-                        }
-        except Exception:
-            pass
-    
-    return None
-
-# =============================================================================
-# UPDATED FRONTEND DISPLAY
-# =============================================================================
-
 def display_song_info(song):
     """Display song name appropriately - only show English if original is not English"""
     # Check if original contains non-Latin characters or is clearly non-English
@@ -389,6 +400,46 @@ def display_song_info(song):
     else:
         # English original: Show only original
         return song['original']
+
+# =============================================================================
+# FRONTEND FUNCTIONS
+# =============================================================================
+
+def setup_api_key():
+    """Handle API key setup"""
+    if st.session_state.get('api_key_valid') and st.session_state.get('hide_api_section', False):
+        return
+    
+    st.sidebar.header("🔑 API Configuration")
+    
+    # Check if API key exists in environment
+    env_key = os.getenv("OPENAI_API_KEY")
+    if env_key and validate_api_key(env_key):
+        os.environ["OPENAI_API_KEY"] = env_key
+        st.session_state.api_key_valid = True
+        st.sidebar.success("Using API key from environment")
+        if 'hide_api_section' not in st.session_state:
+            st.session_state.hide_api_section = True
+        return
+    
+    # User input for API key
+    api_key = st.sidebar.text_input(
+        "Enter your OpenAI API Key:",
+        type="password",
+        placeholder="sk-...",
+        help="Get your API key from https://platform.openai.com/api-keys"
+    )
+    
+    if st.sidebar.button("Validate Key"):
+        if validate_api_key(api_key):
+            os.environ["OPENAI_API_KEY"] = api_key
+            st.session_state.api_key_valid = True
+            st.session_state.hide_api_section = True
+            st.sidebar.success("✅ API Key validated!")
+            time.sleep(2)
+            st.rerun()
+        else:
+            st.sidebar.error("❌ Invalid API key")
 
 def main_app():
     """Main application interface with guaranteed accuracy"""
@@ -467,8 +518,11 @@ def main_app():
                         st.code(f"{song['unique_phrase']}")
             
             # Summary
-            found_videos = [song for song in result['songs'] 
-                          if get_song_video_with_verification(result, song)]
+            found_videos = []
+            for song in result['songs']:
+                video_info = get_song_video_with_verification(result, song)
+                if video_info:
+                    found_videos.append(video_info)
             
             if len(found_videos) == 3:
                 st.balloons()
@@ -479,26 +533,14 @@ def main_app():
                 st.info("💡 Some videos couldn't be automatically verified. Use the manual search suggestions above.")
 
 # =============================================================================
-# INITIALIZATION (keep the same)
+# MAIN EXECUTION
 # =============================================================================
 
-if 'used_artists' not in st.session_state:
-    st.session_state.used_artists = set()
-
-if 'used_songs' not in st.session_state:
-    st.session_state.used_songs = {}
-
-if 'api_key_valid' not in st.session_state:
-    st.session_state.api_key_valid = False
-
-if 'hide_api_section' not in st.session_state:
-    st.session_state.hide_api_section = False
-
-# Setup API key (use your existing setup_api_key function)
+# Setup API key first
 setup_api_key()
 
+# Only run main app if API key is valid
 if not st.session_state.api_key_valid:
     st.info("🔑 Please enter your OpenAI API key in the sidebar to use the app.")
 else:
     main_app()
-
