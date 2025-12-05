@@ -12,37 +12,20 @@ from youtube_search import YoutubeSearch
 from langchain.chat_models import ChatOpenAI
 from langchain.prompts import PromptTemplate
 from langchain.chains import LLMChain, SequentialChain
-from langchain.output_parsers import PydanticOutputParser
-from pydantic import BaseModel, Field
-
-# =============================================================================
-# DATA MODELS (Pydantic for structured output)
-# =============================================================================
-
-class SongInfo(BaseModel):
-    """Model for song information"""
-    title: str = Field(description="Title of the song")
-    youtube_url: str = Field(description="YouTube URL for the official video")
-
-class ArtistRecommendation(BaseModel):
-    """Model for artist recommendation with songs"""
-    artist_name: str = Field(description="Name of the artist with official YouTube channel")
-    artist_description: str = Field(description="Brief description of the artist")
-    songs: List[SongInfo] = Field(description="List of 3 songs from official YouTube channel")
 
 # =============================================================================
 # LLM CHAINS & PROMPT TEMPLATES
 # =============================================================================
 
-def initialize_llm():
-    """Initialize the LLM with the current API key"""
+def initialize_llm(api_key: str):
+    """Initialize the LLM with the provided API key"""
     try:
-        from langchain.chat_models import ChatOpenAI
         llm = ChatOpenAI(
             model="gpt-4", 
-            temperature=1.0,
-            openai_api_key=os.environ.get("OPENAI_API_KEY")  # Pass the API key directly
-        ) #using chatgpt4 as our LLM (Large Language Model) for generating responses, the temperature indicates how creative/random the response from chatgpt will be
+            temperature=0.7,
+            openai_api_key=api_key,
+            max_tokens=1000
+        )
         return llm
     except Exception as e:
         st.error(f"Failed to initialize OpenAI: {e}")
@@ -226,6 +209,12 @@ def main():
         layout="wide"
     )
     
+    # Initialize session state
+    if 'recommendations' not in st.session_state:
+        st.session_state.recommendations = []
+    if 'api_key' not in st.session_state:
+        st.session_state.api_key = ""
+    
     # Title and description
     st.title("🎵 Music Discovery Pro")
     st.markdown("""
@@ -238,9 +227,15 @@ def main():
     api_key = st.sidebar.text_input(
         "OpenAI API Key:",
         type="password",
+        value=st.session_state.api_key,
         placeholder="sk-...",
-        help="Get your API key from https://platform.openai.com/api-keys"
+        help="Get your API key from https://platform.openai.com/api-keys",
+        key="api_key_input"
     )
+    
+    # Store API key in session state
+    if api_key:
+        st.session_state.api_key = api_key
     
     # Genre input
     genre = st.text_input(
@@ -248,10 +243,6 @@ def main():
         placeholder="e.g., K-pop, Lo-fi Hip Hop, Flamenco, Vaporwave, Bhangra...",
         key="genre_input"
     )
-    
-    # Initialize session state
-    if 'recommendations' not in st.session_state:
-        st.session_state.recommendations = []
     
     # Search button
     col1, col2, col3 = st.columns([1, 2, 1])
@@ -263,13 +254,22 @@ def main():
         )
     
     # Process search
-    if search_button and genre and api_key:
+    if search_button:
+        # Validate inputs
+        if not genre:
+            st.error("❌ Please enter a music genre!")
+            return
+        
+        if not st.session_state.api_key or not st.session_state.api_key.startswith('sk-'):
+            st.error("❌ Please enter a valid OpenAI API key in the sidebar!")
+            return
+        
         with st.spinner(f"🔍 Searching for {genre} artists with official YouTube channels..."):
             try:
-                # Initialize LLM
-                llm = initialize_llm(api_key)
+                # Initialize LLM with API key
+                llm = initialize_llm(st.session_state.api_key)
                 if not llm:
-                    st.error("Please check your API key and try again.")
+                    st.error("❌ Failed to initialize OpenAI. Please check your API key.")
                     return
                 
                 # Create chains
@@ -281,11 +281,18 @@ def main():
                     chains=[artist_chain, song_chain],
                     input_variables=["genre"],
                     output_variables=["artist_info", "songs_info"],
-                    verbose=False
+                    verbose=True
                 )
                 
                 # Run chain
                 result = full_chain({"genre": genre})
+                
+                # Debug: Show raw output
+                with st.expander("🔍 Debug: Raw LLM Output"):
+                    st.write("**Artist Info:**")
+                    st.code(result["artist_info"])
+                    st.write("**Songs Info:**")
+                    st.code(result["songs_info"])
                 
                 # Parse results
                 parsed_result = parse_llm_output(
@@ -295,6 +302,7 @@ def main():
                 
                 if parsed_result:
                     # Store in session state
+                    parsed_result["genre"] = genre  # Add genre for reference
                     st.session_state.recommendations.append(parsed_result)
                     
                     # Display results
@@ -314,7 +322,7 @@ def main():
                         with col1:
                             st.markdown(f"**{idx}. {song['title']}**")
                             if 'search_query' in song:
-                                with st.expander("Search Query Used"):
+                                with st.expander("🔍 Search Query Used"):
                                     st.code(song['search_query'], language=None)
                         
                         with col2:
@@ -329,12 +337,21 @@ def main():
                         
                         # Display video
                         if song['youtube_url']:
-                            st.video(song['youtube_url'])
+                            try:
+                                st.video(song['youtube_url'])
+                            except Exception as e:
+                                st.warning(f"Could not embed video. Here's the link: {song['youtube_url']}")
                         
                         st.divider()
                     
+                else:
+                    st.error("❌ Could not parse the results. Please try again.")
+                    
             except Exception as e:
-                st.error(f"An error occurred: {str(e)}")
+                st.error(f"❌ An error occurred: {str(e)}")
+                import traceback
+                with st.expander("🔍 Error Details"):
+                    st.code(traceback.format_exc())
     
     # Display previous recommendations
     if st.session_state.recommendations:
@@ -346,33 +363,10 @@ def main():
                 st.write(f"**Artist:** {rec['artist_name']}")
                 st.write(f"**Songs found:** {len(rec['songs'])}")
                 
-                if st.button(f"Load #{len(st.session_state.recommendations)-i}", key=f"load_{i}"):
-                    # This would reload the recommendation
-                    st.info("Feature to load previous results coming soon!")
-    
-    # Instructions
-    with st.expander("ℹ️ How to use this app"):
-        st.markdown("""
-        **Features:**
-        1. **Official Channels Only**: Finds artists with verified YouTube channels
-        2. **Global Music**: Works with any genre in any language
-        3. **Direct Links**: Provides clickable YouTube links
-        4. **Search Transparency**: Shows what was searched to find each video
-        
-        **Tips:**
-        - Be specific with genres for better results
-        - Try genres in different languages
-        - Use both broad (e.g., "Rock") and specific (e.g., "Math Rock") genres
-        
-        **Examples to try:**
-        - City Pop
-        - Reggaeton
-        - J-Pop
-        - Afrobeat
-        - Synthwave
-        - K-pop
-        """)
+                # Add a button to reload this recommendation
+                if st.button(f"Load", key=f"load_{i}"):
+                    # You could implement loading functionality here
+                    st.info("Click the main search button with a new genre to search again!")
 
 if __name__ == "__main__":
     main()
-
