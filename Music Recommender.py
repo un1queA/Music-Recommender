@@ -1,657 +1,377 @@
 # prerequisites:
-# pip install langchain
-# pip install openai
-# pip install langchain -U langchain-community
-# pip install youtube-search
-# pip install httpx==0.24.1
-# pip install streamlit
-# pip install streamlit -U streamlit
-# pip install -U langchain-openai
-# Run with this command ==> python -m streamlit run IAMUSIC2.py --logger.level=error
+# pip install langchain openai langchain-community youtube-search streamlit
+# Run: streamlit run app.py
 
 import streamlit as st
 import os
-import logging
 import re
+from typing import List, Dict, Optional
 from youtube_search import YoutubeSearch
-import time
 
-# Set up logging
-logging.getLogger("streamlit").setLevel(logging.WARNING)
-
-# =============================================================================
-# INITIALIZATION
-# =============================================================================
-
-if 'used_artists' not in st.session_state:
-    st.session_state.used_artists = set()
-
-if 'used_songs' not in st.session_state:
-    st.session_state.used_songs = {}
-
-if 'api_key_valid' not in st.session_state:
-    st.session_state.api_key_valid = False
-
-if 'hide_api_section' not in st.session_state:
-    st.session_state.hide_api_section = False
+# Import LangChain components
+from langchain.chat_models import ChatOpenAI
+from langchain.prompts import PromptTemplate
+from langchain.chains import LLMChain, SequentialChain
+from langchain.output_parsers import PydanticOutputParser
+from pydantic import BaseModel, Field
 
 # =============================================================================
-# BACKEND FUNCTIONS
+# DATA MODELS (Pydantic for structured output)
 # =============================================================================
 
-def validate_api_key(api_key):
-    """Check if the API key is a valid OpenAI GPT key"""
-    if not api_key.startswith('sk-'):
-        return False
-    return True
+class SongInfo(BaseModel):
+    """Model for song information"""
+    title: str = Field(description="Title of the song")
+    youtube_url: str = Field(description="YouTube URL for the official video")
 
-def clean_artist_name(artist):
-    """Clean artist name to avoid duplicates"""
-    clean_name = re.sub(r'\([^)]*\)', '', artist).strip()
-    return clean_name.lower()
+class ArtistRecommendation(BaseModel):
+    """Model for artist recommendation with songs"""
+    artist_name: str = Field(description="Name of the artist with official YouTube channel")
+    artist_description: str = Field(description="Brief description of the artist")
+    songs: List[SongInfo] = Field(description="List of 3 songs from official YouTube channel")
 
-def initialize_llm():
-    """Initialize the LLM with the current API key"""
+# =============================================================================
+# LLM CHAINS & PROMPT TEMPLATES
+# =============================================================================
+
+def initialize_llm(api_key: str) -> Optional[ChatOpenAI]:
+    """Initialize the LLM with the provided API key"""
     try:
-        from langchain.chat_models import ChatOpenAI
+        os.environ["OPENAI_API_KEY"] = api_key
         llm = ChatOpenAI(
-            model="gpt-4", 
-            temperature=1.0,
-            openai_api_key=os.environ.get("OPENAI_API_KEY")
+            model="gpt-4",
+            temperature=0.7,
+            max_tokens=1000
         )
         return llm
     except Exception as e:
-        st.error(f"Failed to initialize OpenAI: {e}")
+        st.error(f"Failed to initialize LLM: {e}")
         return None
 
-def generate_search_terms(original_title, english_title, unique_phrase, language):
-    """Generate multiple search strategies for a song based on its language"""
-    search_sets = []
+def create_artist_finder_chain(llm: ChatOpenAI):
+    """Create chain to find artist with official YouTube channel"""
     
-    # Strategy 1: Exact original title search (highest priority for non-English)
-    if language != "English":
-        search_sets.append({
-            'name': 'Exact Original',
-            'queries': [
-                f'"{original_title}" official music video',
-                f'"{original_title}" 公式MV' if language == "Japanese" else f'"{original_title}" MV',
-                f'"{original_title}" 뮤직비디오' if language == "Korean" else f'"{original_title}" MV'
-            ],
-            'weight': 1.0
-        })
-    
-    # Strategy 2: English title search (only if different and exists)
-    if english_title and english_title.lower() != original_title.lower():
-        search_sets.append({
-            'name': 'English Title',
-            'queries': [
-                f'"{english_title}" official music video',
-                f'"{english_title}" MV'
-            ],
-            'weight': 0.8
-        })
-    
-    # Strategy 3: Unique phrase search (context-based)
-    search_sets.append({
-        'name': 'Unique Phrase',
-        'queries': [
-            f'"{unique_phrase}"',
-            f'{unique_phrase} official'
-        ],
-        'weight': 0.9
-    })
-    
-    # Strategy 4: Language-specific search terms
-    if language != "English":
-        # Add language-specific search terms
-        lang_terms = {
-            "Japanese": ["アニメ", "主題歌", "オープニング"],
-            "Korean": ["K-pop", "가사", "뮤비"],
-            "Chinese": ["中文歌曲", "MV", "官方"],
-            "Spanish": ["español", "canción", "vídeo oficial"]
-        }
+    artist_prompt = PromptTemplate(
+        input_variables=["genre"],
+        template="""
+        Find an artist who has an OFFICIAL YouTube channel and specializes in {genre} music.
         
-        if language in lang_terms:
-            for term in lang_terms[language]:
-                search_sets.append({
-                    'name': f'{language} Context',
-                    'queries': [f'"{original_title}" {term}'],
-                    'weight': 0.7
-                })
-    
-    return search_sets
-
-def detect_language(text):
-    """Detect the primary language of a text"""
-    # Simple language detection based on character ranges
-    japanese_chars = any(0x3040 <= ord(char) <= 0x309F or  # Hiragana
-                        0x30A0 <= ord(char) <= 0x30FF or  # Katakana
-                        0x4E00 <= ord(char) <= 0x9FFF for char in text)  # Kanji
-    
-    korean_chars = any(0xAC00 <= ord(char) <= 0xD7A3 for char in text)
-    chinese_chars = any(0x4E00 <= ord(char) <= 0x9FFF for char in text)
-    
-    if japanese_chars:
-        return "Japanese"
-    elif korean_chars:
-        return "Korean"
-    elif chinese_chars:
-        return "Chinese"
-    elif any(0x0400 <= ord(char) <= 0x04FF for char in text):  # Cyrillic
-        return "Russian"
-    elif any(0x0600 <= ord(char) <= 0x06FF for char in text):  # Arabic
-        return "Arabic"
-    else:
-        # Check if it's mostly Latin characters
-        latin_chars = sum(1 for char in text if 'a' <= char <= 'z' or 'A' <= char <= 'Z' or char.isspace())
-        if latin_chars / max(len(text), 1) > 0.7:
-            return "English"
-        else:
-            return "Unknown"
-
-def calculate_comprehensive_score(title, description, channel, artist_info, song_info, query):
-    """Calculate score with multiple verification layers"""
-    score = 0.0
-    max_score = 1.0
-    
-    title_lower = title.lower()
-    desc_lower = (description or '').lower()
-    channel_lower = channel.lower()
-    
-    # 1. Artist verification (30% - MANDATORY)
-    artist_indicators = [
-        artist_info['stage_name'].lower(),
-        artist_info['real_name'].lower() if artist_info['real_name'] != "Not widely published" else ""
-    ]
-    
-    artist_found = False
-    for indicator in artist_indicators:
-        if indicator and indicator in title_lower:
-            score += 0.15
-            artist_found = True
-        if indicator and indicator in channel_lower:
-            score += 0.15
-            artist_found = True
-    
-    # REJECTION RULE: If artist not found at all, reject completely
-    if not artist_found:
-        return 0.0
-    
-    # 2. Song title verification (40%)
-    # Check original title (exact or partial)
-    original_lower = song_info['original'].lower()
-    if original_lower in title_lower:
-        score += 0.4  # Exact match bonus
-    else:
-        # Check for partial matches with original title
-        original_words = set(original_lower.split())
-        title_words = set(title_lower.split())
-        common_words = original_words.intersection(title_words)
-        if common_words:
-            score += (len(common_words) / max(len(original_words), 1)) * 0.3
-    
-    # 3. English title verification (bonus only)
-    if song_info['english'] and song_info['english'].lower() in title_lower:
-        score += 0.1  # Bonus for English title match
-    
-    # 4. Unique phrase verification (20%)
-    if song_info['unique_phrase'].lower() in desc_lower:
-        score += 0.2
-    elif any(word.lower() in desc_lower for word in song_info['unique_phrase'].split()[:3]):
-        score += 0.1
-    
-    # 5. Official indicators (10%)
-    official_terms = ['official', 'vevo', 'music video', 'mv', '公式', '뮤직비디오', '공식']
-    for term in official_terms:
-        if term in title_lower or term in desc_lower:
-            score += 0.03  # Smaller increments for multiple matches
-            break
-    
-    # 6. Language consistency bonus
-    detected_lang = detect_language(song_info['original'])
-    title_lang = detect_language(title)
-    if detected_lang == title_lang and detected_lang != "Unknown":
-        score += 0.05
-    
-    # 7. Penalties for unwanted content
-    unwanted = ['cover', 'tribute', 'reaction', 'lyrics', 'karaoke', 'instrumental', 'fan', 'reaccion', 'カバー']
-    penalty_applied = False
-    for term in unwanted:
-        if term in title_lower:
-            score -= 0.4  # Strong penalty
-            penalty_applied = True
-            break
-    
-    # 8. View count bonus (if available in description)
-    if 'million' in desc_lower or '000,000' in desc_lower or 'views' in desc_lower:
-        score += 0.05
-    
-    # 9. Channel name match bonus
-    if artist_info.get('youtube_channel') and artist_info['youtube_channel'] != "Unknown":
-        if artist_info['youtube_channel'].lower() in channel_lower:
-            score += 0.1
-    
-    return min(max_score, max(0.0, score))
-
-def find_and_verify_video(artist_info, song_info, search_strategies):
-    """Find and VERIFY a video using multiple search strategies"""
-    all_results = []
-    
-    for strategy in search_strategies:
-        for query in strategy['queries']:
-            try:
-                # Add artist name to query for context
-                enhanced_query = f"{query} {artist_info['stage_name']}"
-                results = YoutubeSearch(enhanced_query, max_results=10).to_dict()
-                
-                for result in results:
-                    score = calculate_comprehensive_score(
-                        result['title'],
-                        result.get('description', ''),
-                        result['channel'],
-                        artist_info,
-                        song_info,
-                        query
-                    )
-                    
-                    if score >= 0.7:  # Good match threshold
-                        result['strategy'] = strategy['name']
-                        result['query'] = query
-                        result['score'] = score
-                        all_results.append(result)
-                        
-            except Exception:
-                continue
-    
-    # Sort by score and remove duplicates
-    if all_results:
-        # Remove duplicates by video ID
-        seen_ids = set()
-        unique_results = []
-        for result in sorted(all_results, key=lambda x: x['score'], reverse=True):
-            if result['id'] not in seen_ids:
-                seen_ids.add(result['id'])
-                unique_results.append(result)
+        IMPORTANT REQUIREMENTS:
+        1. The artist MUST have an official, verified YouTube channel
+        2. The artist should be known for {genre} music
+        3. The genre can be in any language (not just English)
+        4. Provide the exact artist name as it appears on YouTube
         
-        # Return best result if score is high enough
-        if unique_results and unique_results[0]['score'] >= 0.85:
-            return unique_results[0]
-    
-    return None
-
-def get_song_video_with_verification(artist_info, song):
-    """Main function to get verified video for a song"""
-    # Detect language for better search
-    language = detect_language(song['original'])
-    
-    # Generate search strategies for this song
-    search_strategies = generate_search_terms(
-        song['original'], 
-        song['english'], 
-        song['unique_phrase'],
-        language
+        Return in this format:
+        ARTIST: [Artist Name]
+        DESCRIPTION: [Brief description of the artist and their YouTube channel]
+        """
     )
     
-    # First attempt: Normal search with strategies
-    video = find_and_verify_video(artist_info, song, search_strategies)
+    return LLMChain(llm=llm, prompt=artist_prompt, output_key="artist_info")
+
+def create_song_finder_chain(llm: ChatOpenAI):
+    """Create chain to find songs from official channel"""
     
-    if video:
-        return {
-            'video_id': video['id'],
-            'title': video['title'],
-            'channel': video['channel'],
-            'strategy': video.get('strategy', 'Unknown'),
-            'score': video.get('score', 0),
-            'verified': video.get('score', 0) >= 0.85
-        }
+    song_prompt = PromptTemplate(
+        input_variables=["artist_info", "genre"],
+        template="""
+        Based on this artist information: {artist_info}
+        
+        Find 3 songs from their OFFICIAL YouTube channel that represent {genre} music.
+        
+        For EACH song, provide:
+        1. The exact song title as it appears on YouTube
+        2. A search query that will find the official video on YouTube
+        
+        Format exactly like this:
+        SONG 1 TITLE: [Title]
+        SONG 1 SEARCH: [Artist Name] [Song Title] official music video
+        
+        SONG 2 TITLE: [Title]
+        SONG 2 SEARCH: [Artist Name] [Song Title] official video
+        
+        SONG 3 TITLE: [Title]
+        SONG 3 SEARCH: [Artist Name] [Song Title] official
+        """
+    )
     
-    # Second attempt: If artist has known YouTube channel
-    if artist_info.get('youtube_channel') and artist_info['youtube_channel'] != "Unknown":
-        try:
-            channel_query = f"{song['original']} {artist_info['youtube_channel']}"
-            results = YoutubeSearch(channel_query, max_results=5).to_dict()
+    return LLMChain(llm=llm, prompt=song_prompt, output_key="songs_info")
+
+# =============================================================================
+# YOUTUBE SEARCH FUNCTIONS
+# =============================================================================
+
+def search_youtube_video(search_query: str, artist_name: str) -> Optional[str]:
+    """Search for official YouTube video with enhanced filtering"""
+    try:
+        results = YoutubeSearch(search_query, max_results=10).to_dict()
+        
+        # Clean artist name for comparison
+        clean_artist = re.sub(r'[^\w\s]', '', artist_name.lower())
+        
+        for result in results:
+            title = result['title'].lower()
+            channel = result['channel'].lower()
+            video_id = result['id']
             
-            for result in results:
-                if artist_info['youtube_channel'].lower() in result['channel'].lower():
-                    score = calculate_comprehensive_score(
-                        result['title'],
-                        result.get('description', ''),
-                        result['channel'],
-                        artist_info,
-                        song,
-                        channel_query
-                    )
-                    
-                    if score >= 0.7:
-                        return {
-                            'video_id': result['id'],
-                            'title': result['title'],
-                            'channel': result['channel'],
-                            'strategy': 'Channel Search',
-                            'score': score,
-                            'verified': score >= 0.85
-                        }
-        except Exception:
-            pass
+            # Strong indicators of official content
+            official_indicators = [
+                'official',
+                'music video',
+                'mv]',
+                '【mv】',
+                'lyric video',
+                'visualizer'
+            ]
+            
+            # Check if channel contains artist name
+            artist_in_channel = any(word in channel for word in clean_artist.split())
+            
+            # Check if title contains official indicators
+            is_official = any(indicator in title for indicator in official_indicators)
+            
+            # Check for common non-official indicators (avoid these)
+            non_official_indicators = [
+                'cover',
+                'tribute',
+                'karaoke',
+                'instrumental',
+                'remix',
+                'mashup',
+                'fan made',
+                'lyrics only'
+            ]
+            
+            is_unofficial = any(indicator in title for indicator in non_official_indicators)
+            
+            # If it's from the artist's channel and looks official, return it
+            if artist_in_channel and is_official and not is_unofficial:
+                return f"https://www.youtube.com/watch?v={video_id}"
+            
+            # Fallback: if artist in channel and not unofficial, accept it
+            if artist_in_channel and not is_unofficial:
+                return f"https://www.youtube.com/watch?v={video_id}"
+        
+        # If no perfect match, return first result (with warning)
+        if results:
+            return f"https://www.youtube.com/watch?v={results[0]['id']}"
+            
+    except Exception as e:
+        st.warning(f"YouTube search error for '{search_query}': {str(e)[:100]}")
     
     return None
 
-def generate_artist_and_songs(genre):
-    """Generate artist and songs with language-aware formatting"""
-    llm = initialize_llm()
-    if not llm:
+def parse_llm_output(artist_output: str, songs_output: str) -> Dict:
+    """Parse LLM outputs into structured data"""
+    try:
+        # Parse artist info
+        artist_lines = artist_output.split('\n')
+        artist_name = ""
+        artist_desc = ""
+        
+        for line in artist_lines:
+            if line.startswith("ARTIST:"):
+                artist_name = line.replace("ARTIST:", "").strip()
+            elif line.startswith("DESCRIPTION:"):
+                artist_desc = line.replace("DESCRIPTION:", "").strip()
+        
+        # Parse songs info
+        songs = []
+        lines = songs_output.split('\n')
+        
+        for i in range(0, len(lines), 3):
+            if i + 1 < len(lines):
+                title_line = lines[i]
+                search_line = lines[i + 1] if i + 1 < len(lines) else ""
+                
+                if "TITLE:" in title_line:
+                    title = title_line.split("TITLE:", 1)[1].strip()
+                    
+                    # Extract search query
+                    search_query = ""
+                    if "SEARCH:" in search_line:
+                        search_query = search_line.split("SEARCH:", 1)[1].strip()
+                    else:
+                        search_query = f"{artist_name} {title} official music video"
+                    
+                    # Search for YouTube video
+                    youtube_url = search_youtube_video(search_query, artist_name)
+                    
+                    if youtube_url:
+                        songs.append({
+                            "title": title,
+                            "youtube_url": youtube_url,
+                            "search_query": search_query
+                        })
+        
+        return {
+            "artist_name": artist_name,
+            "artist_description": artist_desc,
+            "songs": songs[:3]  # Limit to 3 songs
+        }
+        
+    except Exception as e:
+        st.error(f"Error parsing LLM output: {e}")
         return None
 
-    max_attempts = 5
-    for attempt in range(max_attempts):
-        try:
-            # FIRST: Get artist with metadata
-            artist_prompt = f"""I need ONE artist specializing in {genre}. 
-            Provide in EXACT format:
-            Stage Name: [artist stage name]
-            Real Name: [real name or "Not widely published"]
-            YouTube Channel Name: [exact name of their official YouTube channel if known]
-            
-            REQUIREMENTS:
-            1. Artist MUST have official YouTube channel with music videos
-            2. The YouTube channel name should be their verified/official channel
-            3. Provide the most common/known channel name
-            4. If unsure about channel, write "Unknown"
-            
-            Example for anime genre:
-            Stage Name: LiSA
-            Real Name: Risa Oribe
-            YouTube Channel Name: LiSA Official Channel"""
-            
-            artist_response = llm.predict(artist_prompt)
-            
-            # Parse artist info
-            stage_name, real_name, youtube_channel = None, None, None
-            for line in artist_response.strip().split('\n'):
-                line = line.strip()
-                if line.startswith('Stage Name:'):
-                    stage_name = line.replace('Stage Name:', '').strip()
-                elif line.startswith('Real Name:'):
-                    real_name = line.replace('Real Name:', '').strip()
-                elif line.startswith('YouTube Channel Name:'):
-                    youtube_channel = line.replace('YouTube Channel Name:', '').strip()
-            
-            if not stage_name:
-                continue
-            
-            clean_artist = clean_artist_name(stage_name)
-            
-            # Check for duplicates
-            if clean_artist in st.session_state.used_artists:
-                continue
-            
-            # SECOND: Get 3 songs with language preservation
-            song_prompt = f"""Give me EXACTLY 3 songs from {stage_name} with these requirements:
-            
-            CRITICAL REQUIREMENTS FOR EACH SONG:
-            1. MUST have an official music video on YouTube
-            2. MUST be from the artist's official channel
-            3. Video should have at least 1 million views (popular)
-            4. Song should be identifiable by a unique phrase in the video description
-            
-            FORMAT FOR EACH SONG (EXACTLY):
-            Original: [exact title as it appears on YouTube in original language]
-            English: [English translation or name if available, otherwise "None"]
-            Unique Phrase: [5-7 word unique phrase from video description]
-            Language: [Primary language of the song: Japanese, Korean, English, Chinese, Spanish, etc.]
-            
-            Example for LiSA (Japanese artist):
-            Original: 紅蓮華
-            English: Gurenge
-            Unique Phrase: Demon Slayer Kimetsu no Yaiba opening theme song
-            Language: Japanese
-            
-            Provide only 3 songs in this exact format, nothing else."""
-            
-            songs_response = llm.predict(song_prompt)
-            
-            # Parse songs with language info
-            song_list = []
-            current_song = {}
-            
-            for line in songs_response.strip().split('\n'):
-                line = line.strip()
-                if line.startswith('Original:'):
-                    if current_song:  # Save previous song if exists
-                        song_list.append(current_song)
-                    current_song = {'original': line.replace('Original:', '').strip()}
-                elif line.startswith('English:'):
-                    current_song['english'] = line.replace('English:', '').strip()
-                elif line.startswith('Unique Phrase:'):
-                    current_song['unique_phrase'] = line.replace('Unique Phrase:', '').strip()
-                elif line.startswith('Language:'):
-                    current_song['language'] = line.replace('Language:', '').strip()
-            
-            # Add the last song
-            if current_song:
-                song_list.append(current_song)
-            
-            # Validate we got exactly 3 complete songs
-            if len(song_list) == 3 and all('original' in s and 'english' in s and 'unique_phrase' in s and 'language' in s for s in song_list):
-                # Update used artists
-                st.session_state.used_artists.add(clean_artist)
-                if clean_artist not in st.session_state.used_songs:
-                    st.session_state.used_songs[clean_artist] = []
-                
-                return {
-                    'stage_name': stage_name,
-                    'real_name': real_name if real_name else "Not widely published",
-                    'youtube_channel': youtube_channel if youtube_channel else "Unknown",
-                    'songs': song_list,
-                    'clean_name': clean_artist
-                }
-                
-        except Exception as e:
-            continue
-    
-    st.error("Couldn't find a suitable artist after 5 attempts.")
-    return None
-
-def format_song_display(song):
-    """Format song display with original language as primary"""
-    display = song['original']
-    
-    # Add English in parentheses only if:
-    # 1. English exists and is not "None"
-    # 2. Song is not in English
-    # 3. English is different from original
-    if (song.get('english') and 
-        song['english'].lower() != 'none' and 
-        song.get('language', '').lower() != 'english' and
-        song['english'].lower() != song['original'].lower()):
-        display += f" ({song['english']})"
-    
-    # Add language flag emoji
-    language_flags = {
-        'Japanese': '🇯🇵',
-        'Korean': '🇰🇷', 
-        'Chinese': '🇨🇳',
-        'Spanish': '🇪🇸',
-        'French': '🇫🇷',
-        'German': '🇩🇪',
-        'Italian': '🇮🇹',
-        'Portuguese': '🇵🇹',
-        'Russian': '🇷🇺',
-        'Hindi': '🇮🇳',
-        'Arabic': '🇸🇦',
-        'Thai': '🇹🇭',
-        'Vietnamese': '🇻🇳'
-    }
-    
-    if song.get('language') in language_flags:
-        display = f"{language_flags[song['language']]} {display}"
-    
-    return display
-
 # =============================================================================
-# FRONTEND FUNCTIONS
+# MAIN APPLICATION
 # =============================================================================
 
-def setup_api_key():
-    """Handle API key setup"""
-    if st.session_state.get('api_key_valid') and st.session_state.get('hide_api_section', False):
-        return
+def main():
+    st.set_page_config(
+        page_title="🎵 Music Discovery Pro",
+        page_icon="🎵",
+        layout="wide"
+    )
     
+    # Title and description
+    st.title("🎵 Music Discovery Pro")
+    st.markdown("""
+    Discover artists with official YouTube channels in any music genre.
+    Enter a genre below to get started!
+    """)
+    
+    # API Key input
     st.sidebar.header("🔑 API Configuration")
-    
-    # Check if API key exists in environment
-    env_key = os.getenv("OPENAI_API_KEY")
-    if env_key and validate_api_key(env_key):
-        os.environ["OPENAI_API_KEY"] = env_key
-        st.session_state.api_key_valid = True
-        st.sidebar.success("Using API key from environment")
-        if 'hide_api_section' not in st.session_state:
-            st.session_state.hide_api_section = True
-        return
-    
-    # User input for API key
     api_key = st.sidebar.text_input(
-        "Enter your OpenAI API Key:",
+        "OpenAI API Key:",
         type="password",
         placeholder="sk-...",
         help="Get your API key from https://platform.openai.com/api-keys"
     )
     
-    if st.sidebar.button("Validate Key"):
-        if validate_api_key(api_key):
-            os.environ["OPENAI_API_KEY"] = api_key
-            st.session_state.api_key_valid = True
-            st.session_state.hide_api_section = True
-            st.sidebar.success("✅ API Key validated!")
-            time.sleep(2)
-            st.rerun()
-        else:
-            st.sidebar.error("❌ Invalid API key")
-
-def main_app():
-    """Main application interface with language-aware display"""
-    st.title("🎵 I AM MUSIC - Multilingual Edition")
+    # Genre input
+    genre = st.text_input(
+        "Enter a music genre:",
+        placeholder="e.g., K-pop, Lo-fi Hip Hop, Flamenco, Vaporwave, Bhangra...",
+        key="genre_input"
+    )
     
-    if st.sidebar.button("🔄 Reset Memory"):
-        st.session_state.used_artists = set()
-        st.session_state.used_songs = {}
-        st.success("Memory reset!")
+    # Initialize session state
+    if 'recommendations' not in st.session_state:
+        st.session_state.recommendations = []
     
-    genre = st.text_input("Enter a music genre:", placeholder="e.g., anime, kpop, rock, jazz, latin pop")
-
-    if genre:
-        with st.spinner("🎵 Finding multilingual recommendations..."):
-            # Get artist and songs
-            result = generate_artist_and_songs(genre)
-            
-            if result is None:
-                st.error("Failed to generate recommendations. Try a different genre.")
-                return
-            
-            # Display artist info
-            st.subheader(f"🎤 {result['stage_name']}")
-            col1, col2 = st.columns(2)
-            with col1:
-                if result['real_name'] != "Not widely published":
-                    st.caption(f"**Real name:** {result['real_name']}")
-            with col2:
-                if result['youtube_channel'] != "Unknown":
-                    st.caption(f"**YouTube:** {result['youtube_channel']}")
-            
-            # Display songs
-            st.subheader("🎵 Recommended Songs")
-            
-            for i, song in enumerate(result['songs'], 1):
-                st.divider()
+    # Search button
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        search_button = st.button(
+            "🎯 Find Artist & Songs",
+            type="primary",
+            use_container_width=True
+        )
+    
+    # Process search
+    if search_button and genre and api_key:
+        with st.spinner(f"🔍 Searching for {genre} artists with official YouTube channels..."):
+            try:
+                # Initialize LLM
+                llm = initialize_llm(api_key)
+                if not llm:
+                    st.error("Please check your API key and try again.")
+                    return
                 
-                # Song header with language info
-                col_title, col_lang = st.columns([3, 1])
-                with col_title:
-                    display_name = format_song_display(song)
-                    st.markdown(f"### {i}. {display_name}")
-                with col_lang:
-                    if song.get('language'):
-                        st.caption(f"*{song['language']}*")
+                # Create chains
+                artist_chain = create_artist_finder_chain(llm)
+                song_chain = create_song_finder_chain(llm)
                 
-                # Unique phrase context
-                if song.get('unique_phrase'):
-                    st.info(f"🎯 **Context:** {song['unique_phrase']}")
+                # Create sequential chain
+                full_chain = SequentialChain(
+                    chains=[artist_chain, song_chain],
+                    input_variables=["genre"],
+                    output_variables=["artist_info", "songs_info"],
+                    verbose=False
+                )
                 
-                # Search and display video
-                with st.spinner(f"🔍 Verifying video for {song['original']}..."):
-                    video_info = get_song_video_with_verification(result, song)
+                # Run chain
+                result = full_chain({"genre": genre})
                 
-                # Display result
-                if video_info:
-                    # Video found - show with confidence
-                    confidence_color = "🟢" if video_info['score'] >= 0.9 else "🟡" if video_info['score'] >= 0.8 else "🟠"
-                    st.success(f"{confidence_color} **Verified** (Confidence: {video_info['score']:.0%})")
+                # Parse results
+                parsed_result = parse_llm_output(
+                    result["artist_info"],
+                    result["songs_info"]
+                )
+                
+                if parsed_result:
+                    # Store in session state
+                    st.session_state.recommendations.append(parsed_result)
                     
-                    # Show video
-                    video_url = f"https://www.youtube.com/watch?v={video_info['video_id']}"
-                    st.video(video_url)
+                    # Display results
+                    st.success(f"✅ Found **{parsed_result['artist_name']}**!")
                     
-                    # Verification details
-                    with st.expander("📊 Verification Details"):
-                        cols = st.columns(3)
-                        with cols[0]:
-                            st.metric("Strategy", video_info['strategy'])
-                        with cols[1]:
-                            st.metric("Confidence", f"{video_info['score']:.0%}")
-                        with cols[2]:
-                            st.metric("Channel Match", "✅" if result['youtube_channel'].lower() in video_info['channel'].lower() else "❌")
-                        
-                        st.caption(f"**Channel:** {video_info['channel']}")
-                        st.caption(f"**Video Title:** {video_info['title']}")
-                        
-                        # Language match indicator
-                        detected_lang = detect_language(song['original'])
-                        video_lang = detect_language(video_info['title'])
-                        if detected_lang == video_lang and detected_lang != "Unknown":
-                            st.success(f"✅ Language match: {detected_lang}")
-                else:
-                    # Video not found
-                    st.error("❌ Could not verify official video")
+                    # Artist info
+                    st.markdown(f"### 🎤 {parsed_result['artist_name']}")
+                    if parsed_result['artist_description']:
+                        st.info(parsed_result['artist_description'])
                     
-                    # Provide manual search options
-                    with st.expander("🔍 Try searching manually"):
-                        st.write("**Search these exact terms on YouTube:**")
+                    # Songs section
+                    st.markdown("### 🎵 Recommended Songs")
+                    
+                    for idx, song in enumerate(parsed_result['songs'], 1):
+                        col1, col2 = st.columns([3, 1])
                         
-                        # Original language search
-                        st.code(f"{result['stage_name']} {song['original']} official music video", language='bash')
+                        with col1:
+                            st.markdown(f"**{idx}. {song['title']}**")
+                            if 'search_query' in song:
+                                with st.expander("Search Query Used"):
+                                    st.code(song['search_query'], language=None)
                         
-                        # English search if available
-                        if song.get('english') and song['english'].lower() != 'none':
-                            st.code(f"{result['stage_name']} {song['english']} official music video", language='bash')
+                        with col2:
+                            if song['youtube_url']:
+                                st.markdown(
+                                    f'<a href="{song["youtube_url"]}" target="_blank">'
+                                    '<button style="background-color: #FF0000; color: white; '
+                                    'border: none; padding: 8px 16px; border-radius: 4px; '
+                                    'cursor: pointer;">▶️ Watch</button></a>',
+                                    unsafe_allow_html=True
+                                )
                         
-                        # Unique phrase search
-                        if song.get('unique_phrase'):
-                            st.code(song['unique_phrase'], language='bash')
-            
-            # Summary
-            st.divider()
-            found_count = 0
-            for song in result['songs']:
-                if get_song_video_with_verification(result, song):
-                    found_count += 1
-            
-            if found_count == 3:
-                st.balloons()
-                st.success("🎉 Perfect! All 3 songs verified with high confidence!")
-            elif found_count > 0:
-                st.success(f"✅ Found {found_count} verified videos out of 3")
-            else:
-                st.info("💡 Use the manual search suggestions above to find the videos.")
+                        # Display video
+                        if song['youtube_url']:
+                            st.video(song['youtube_url'])
+                        
+                        st.divider()
+                    
+            except Exception as e:
+                st.error(f"An error occurred: {str(e)}")
+    
+    # Display previous recommendations
+    if st.session_state.recommendations:
+        st.sidebar.markdown("---")
+        st.sidebar.markdown("### 📚 Previous Searches")
+        
+        for i, rec in enumerate(reversed(st.session_state.recommendations)):
+            with st.sidebar.expander(f"{rec['artist_name']} ({rec.get('genre', 'Unknown')})"):
+                st.write(f"**Artist:** {rec['artist_name']}")
+                st.write(f"**Songs found:** {len(rec['songs'])}")
+                
+                if st.button(f"Load #{len(st.session_state.recommendations)-i}", key=f"load_{i}"):
+                    # This would reload the recommendation
+                    st.info("Feature to load previous results coming soon!")
+    
+    # Instructions
+    with st.expander("ℹ️ How to use this app"):
+        st.markdown("""
+        **Features:**
+        1. **Official Channels Only**: Finds artists with verified YouTube channels
+        2. **Global Music**: Works with any genre in any language
+        3. **Direct Links**: Provides clickable YouTube links
+        4. **Search Transparency**: Shows what was searched to find each video
+        
+        **Tips:**
+        - Be specific with genres for better results
+        - Try genres in different languages
+        - Use both broad (e.g., "Rock") and specific (e.g., "Math Rock") genres
+        
+        **Examples to try:**
+        - City Pop
+        - Reggaeton
+        - J-Pop
+        - Afrobeat
+        - Synthwave
+        - K-pop
+        """)
 
-# =============================================================================
-# MAIN EXECUTION
-# =============================================================================
-
-# Setup API key first
-setup_api_key()
-
-# Only run main app if API key is valid
-if not st.session_state.api_key_valid:
-    st.info("🔑 Please enter your OpenAI API key in the sidebar to use the app.")
-else:
-    main_app()
+if __name__ == "__main__":
+    main()
