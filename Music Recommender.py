@@ -263,14 +263,24 @@ def generate_artist_and_songs(genre):
         - The 'Translation' should be the common English name or a direct translation (e.g., Gurenge or Crimson Lotus)."""
     )
 
-    # Create chains
-    artist_chain = LLMChain(llm=llm, prompt=prompt_template_artist, output_key="artist_raw")
-    song_chain = LLMChain(llm=llm, prompt=prompt_template_song, output_key="songs_raw")
+    # Create chains individually
+    artist_chain = LLMChain(
+        llm=llm,
+        prompt=prompt_template_artist,
+        output_key="artist_raw"
+    )
+    
+    song_chain = LLMChain(
+        llm=llm,
+        prompt=prompt_template_song,
+        output_key="songs_raw"
+    )
 
+    # Create SequentialChain with explicit parameters - FIXED VERSION
     chain = SequentialChain(
-        chains=[artist_chain, song_chain],
         input_variables=["genre"],
         output_variables=["artist_raw", "songs_raw"],
+        chains=[artist_chain, song_chain],
         verbose=False
     )
 
@@ -288,7 +298,7 @@ def generate_artist_and_songs(genre):
                 elif line.startswith('Real Name:'):
                     real_name = line.replace('Real Name:', '').strip()
             if not stage_name:
-                continue # Parsing failed, try again
+                continue  # Parsing failed, try again
             artist_info = {'stage_name': stage_name, 'real_name': real_name}
 
             # --- PARSE SONG INFO ---
@@ -308,14 +318,14 @@ def generate_artist_and_songs(genre):
             # Return only if we successfully parsed exactly 3 songs
             if len(song_list) == 3:
                 return {
-                    "artist_info": artist_info, # This is now a dict
-                    "song_list": song_list      # This is now a list of dicts
+                    "artist_info": artist_info,  # This is now a dict
+                    "song_list": song_list  # This is now a list of dicts
                 }
         except Exception as e:
-            # st.error(f"Attempt {attempt+1} parsing failed: {e}") # Optional debug
+            # Log error but continue trying
+            st.warning(f"Attempt {attempt + 1} failed. Retrying...")
             continue
-    return None # Failed all attempts
-
+    return None  # Failed all attempts
 # =============================================================================
 # FRONTEND FUNCTIONS - UPDATED
 # =============================================================================
@@ -464,3 +474,4 @@ if not st.session_state.api_key_valid:
     st.info("🔑 Please enter your OpenAI API key in the sidebar to use the app.")
 else:
     main_app()
+
