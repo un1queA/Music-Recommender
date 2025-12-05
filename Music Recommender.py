@@ -34,18 +34,18 @@ class ArtistRecommendation(BaseModel):
 # LLM CHAINS & PROMPT TEMPLATES
 # =============================================================================
 
-def initialize_llm(api_key: str) -> Optional[ChatOpenAI]:
-    """Initialize the LLM with the provided API key"""
+def initialize_llm():
+    """Initialize the LLM with the current API key"""
     try:
-        os.environ["OPENAI_API_KEY"] = api_key
+        from langchain.chat_models import ChatOpenAI
         llm = ChatOpenAI(
-            model="gpt-4",
-            temperature=0.7,
-            max_tokens=1000
-        )
+            model="gpt-4", 
+            temperature=1.0,
+            openai_api_key=os.environ.get("OPENAI_API_KEY")  # Pass the API key directly
+        ) #using chatgpt4 as our LLM (Large Language Model) for generating responses, the temperature indicates how creative/random the response from chatgpt will be
         return llm
     except Exception as e:
-        st.error(f"Failed to initialize LLM: {e}")
+        st.error(f"Failed to initialize OpenAI: {e}")
         return None
 
 def create_artist_finder_chain(llm: ChatOpenAI):
@@ -375,3 +375,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
