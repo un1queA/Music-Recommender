@@ -12,7 +12,7 @@ from youtube_search import YoutubeSearch
 
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import PromptTemplate
-from langchain_classic.chains import LLMChain, SequentialChain
+from langchain.chains import LLMChain, SequentialChain
 
 # =============================================================================
 # DEEPSEEK API CONFIGURATION
@@ -404,6 +404,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
