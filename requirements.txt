@@ -1,8 +1,9 @@
 streamlit
-langchain==0.0.347
+langchain==0.1.0
 langchain-openai==0.1.0
-langchain-core
+langchain-core==0.1.33
 youtube-search
 httpx
+
 
 
