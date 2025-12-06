@@ -1,6 +1,7 @@
-streamlit==1.31.0
-langchain>=1.0.0
-langchain-openai>=0.1.0
-langchain-core>=0.1.0
-youtube-search==2.1.2
-httpx==0.25.0
+streamlit
+langchain
+langchain-openai
+langchain-core
+youtube-search
+httpx
+
