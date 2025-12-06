@@ -9,7 +9,8 @@ from typing import List, Dict, Optional
 from youtube_search import YoutubeSearch
 
 # Import LangChain components - updated for DeepSeek
-from langchain_openai import ChatOpenAI  # Compatible with OpenAI format
+
+from langchain.chat_models import ChatOpenAI
 from langchain.prompts import PromptTemplate
 from langchain.chains import LLMChain, SequentialChain
 
@@ -403,6 +404,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
