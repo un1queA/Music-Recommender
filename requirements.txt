@@ -1,7 +1,9 @@
 streamlit
 langchain
 langchain-openai
+langchain-core
 youtube-search
 httpx
+
 
 
