@@ -50,35 +50,35 @@ def clean_artist_name(artist: str) -> str:
 # PROMPT TEMPLATES (Optimized for multiple artists)
 # =============================================================================
 
-def create_artist_finder_chain(llm: ChatOpenAI, excluded_artists: List[str] = None):
-    """Create chain to find multiple artists with official YouTube channels"""
+def create_artist_finder_chain(llm: ChatOpenAI, genre: str):
+    """Create chain to find a UNIQUE artist for the given genre."""
     
+    # Get the list of artists already used for this specific genre
+    excluded_artists = st.session_state.used_artists_by_genre.get(genre.lower(), [])
     excluded_text = ""
     if excluded_artists:
-        excluded_text = f" Avoid these artists that were already suggested: {', '.join(excluded_artists[:5])}."
+        # Tell the AI to avoid these specific names
+        excluded_text = f"CRITICAL: Do not suggest these artists: {', '.join(excluded_artists)}."
     
     artist_prompt = PromptTemplate(
         input_variables=["genre"],
         template=f"""
-        You are a music expert. Find 3 DIFFERENT artists who specialize in {{genre}} music and have official YouTube channels.
+        You are a music expert. Find ONE artist who specializes in {{genre}} music and has an official YouTube channel.
         
         IMPORTANT REQUIREMENTS:
-        1. Each artist MUST have an official YouTube presence (channel or Vevo)
-        2. All artists should be known for {{genre}} music
-        3. Genre can be in any language
-        4. Provide accurate information
-        5. Artists should be diverse (different sub-styles, regions, or eras within {genre})
+        1. The artist MUST have an official YouTube presence (channel, Vevo, or official topic channel)
+        2. Artist should be well-known for {{genre}} music
+        3. Genre can be in any language (e.g., K-pop, J-pop, Reggaeton, Hip Hop, Bhangra)
+        4. Provide the exact artist name as it appears on YouTube
         {excluded_text}
         
-        Return EXACTLY in this format for EACH artist:
+        Return EXACTLY in this format:
         ARTIST: [Artist Name]
-        DESCRIPTION: [Brief description - 1-2 sentences]
-        ---
+        DESCRIPTION: [Brief description - 1 sentence]
         """
     )
+    return LLMChain(llm=llm, prompt=artist_prompt, output_key="artist_info")
     
-    return LLMChain(llm=llm, prompt=artist_prompt, output_key="artists_info")
-
 def create_song_finder_chain(llm: ChatOpenAI):
     """Create chain to find songs from official channel"""
     
@@ -223,7 +223,9 @@ def main():
         page_icon="🎵",
         layout="wide"
     )
-    
+    if 'used_artists_by_genre' not in st.session_state:
+    st.session_state.used_artists_by_genre = {}
+
     # Initialize session state
     if 'recommendations' not in st.session_state:
         st.session_state.recommendations = []
@@ -292,37 +294,36 @@ def main():
             st.error("❌ Please enter your DeepSeek API key in the sidebar!")
             return
         
-        with st.spinner(f"🔍 Finding unique {genre} artists..."):
-            try:
-                # Initialize LLM
-                llm = initialize_llm(st.session_state.api_key)
-                if not llm:
-                    st.error("❌ Failed to initialize DeepSeek. Please check your API key.")
-                    return
+        with st.spinner(f"🔍 Searching for a unique {genre} artist..."):
+        try:
+            # Initialize LLM
+            llm = initialize_llm(st.session_state.api_key)
+            if not llm:
+                return
+            
+            # Create chain WITH the genre context for exclusion
+            artist_chain = create_artist_finder_chain(llm, genre)
+            song_chain = create_song_finder_chain(llm)
+            
+            # Your existing SequentialChain creation...
+            full_chain = SequentialChain(...)
+            
+            # Run the chain
+            result = full_chain({"genre": genre})
+            
+            # Parse the result (your existing parse_llm_output function works)
+            parsed_result = parse_llm_output(result["artist_info"], result["songs_info"])
+            
+            if parsed_result:
+                # --- NEW: TRACK THE USED ARTIST FOR THIS GENRE ---
+                genre_key = genre.lower()
+                if genre_key not in st.session_state.used_artists_by_genre:
+                    st.session_state.used_artists_by_genre[genre_key] = []
                 
-                # Get already used artists for this genre
-                excluded_artists = []
-                for rec in st.session_state.recommendations:
-                    if rec.get("genre", "").lower() == genre.lower():
-                        excluded_artists.append(rec["artist_name"])
-                
-                # Create artist finder chain
-                artist_chain = create_artist_finder_chain(llm, excluded_artists)
-                
-                # Get multiple artists
-                result = artist_chain.run({"genre": genre})
-                artists = parse_artists_from_output(result)
-                
-                # Filter out already used artists
-                filtered_artists = []
-                for artist in artists:
-                    clean_name = clean_artist_name(artist["name"])
-                    if clean_name not in st.session_state.used_artists:
-                        filtered_artists.append(artist)
-                
-                if not filtered_artists:
-                    st.warning("⚠️ Couldn't find new artists for this genre. Try a different genre or reset the session.")
-                    return
+                # Add the new artist to the list for this genre
+                st.session_state.used_artists_by_genre[genre_key].append(
+                    parsed_result['artist_name']
+                )
                 
                 # Store available artists
                 st.session_state.available_artists = filtered_artists
@@ -461,3 +462,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
