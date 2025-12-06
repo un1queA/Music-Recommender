@@ -5,169 +5,147 @@
 import streamlit as st
 import os
 import re
-from typing import List, Dict, Optional, Tuple
+from typing import Dict, Optional
 from youtube_search import YoutubeSearch
 
-# Import LangChain components - updated for DeepSeek
-from langchain_openai import ChatOpenAI  # For the DeepSeek API (OpenAI-compatible)
-from langchain_core.prompts import PromptTemplate  # Prompts moved here
-from langchain.chains import LLMChain, SequentialChain  # Legacy chains moved here
+# Import LangChain components
+from langchain_openai import ChatOpenAI
+from langchain_core.prompts import PromptTemplate
+from langchain.chains import LLMChain, SequentialChain
 
 # =============================================================================
-# DEEPSEEK API CONFIGURATION
+# DEEPSEEK API & INITIALIZATION
 # =============================================================================
 
 def initialize_llm(api_key: str):
     """Initialize the LLM with DeepSeek API"""
     try:
-        # DeepSeek uses OpenAI-compatible API format
         llm = ChatOpenAI(
-            model="deepseek-chat",  # Use "deepseek-chat" for latest model
-            temperature=0.8,  # Increased for more variety
+            model="deepseek-chat",
+            temperature=0.8,
             openai_api_key=api_key,
-            openai_api_base="https://api.deepseek.com",  # DeepSeek API endpoint
-            max_tokens=1500,
-            timeout=30  # Add timeout for reliability
+            openai_api_base="https://api.deepseek.com",
+            max_tokens=1000,
+            timeout=30
         )
         return llm
     except Exception as e:
         st.error(f"Failed to initialize DeepSeek API: {e}")
         return None
 
-# =============================================================================
-# ARTIST NAME CLEANING AND DUPLICATE PREVENTION
-# =============================================================================
-
 def clean_artist_name(artist: str) -> str:
-    """Clean artist name to avoid duplicates like 'lisa' and 'lisa (japanese singer)'"""
-    # Remove anything in parentheses and extra spaces
+    """Clean artist name to avoid duplicates"""
     clean_name = re.sub(r'\([^)]*\)', '', artist).strip()
-    # Remove special characters and convert to lowercase
     clean_name = re.sub(r'[^\w\s]', '', clean_name).lower()
     return clean_name
 
 # =============================================================================
-# PROMPT TEMPLATES (Optimized for multiple artists)
+# LANGCHAIN CHAINS & PROMPTS
 # =============================================================================
 
 def create_artist_finder_chain(llm: ChatOpenAI, genre: str):
     """Create chain to find a UNIQUE artist for the given genre."""
     
-    # Get the list of artists already used for this specific genre
-    excluded_artists = st.session_state.used_artists_by_genre.get(genre.lower(), [])
+    # Get already used artists for this genre
+    genre_key = genre.lower()
+    excluded_artists = st.session_state.used_artists_by_genre.get(genre_key, [])
+    
     excluded_text = ""
     if excluded_artists:
-        # Tell the AI to avoid these specific names
-        excluded_text = f"CRITICAL: Do not suggest these artists: {', '.join(excluded_artists)}."
+        excluded_text = f"\nIMPORTANT: DO NOT suggest these artists: {', '.join(excluded_artists[:5])}. Suggest a DIFFERENT artist."
     
     artist_prompt = PromptTemplate(
         input_variables=["genre"],
-        template=f"""
-        You are a music expert. Find ONE artist who specializes in {{genre}} music and has an official YouTube channel.
+        template=f"""You are a music expert. Find ONE artist who specializes in {{genre}} music and has an official YouTube channel.
         
-        IMPORTANT REQUIREMENTS:
-        1. The artist MUST have an official YouTube presence (channel, Vevo, or official topic channel)
-        2. Artist should be well-known for {{genre}} music
-        3. Genre can be in any language (e.g., K-pop, J-pop, Reggaeton, Hip Hop, Bhangra)
-        4. Provide the exact artist name as it appears on YouTube
-        {excluded_text}
-        
-        Return EXACTLY in this format:
-        ARTIST: [Artist Name]
-        DESCRIPTION: [Brief description - 1 sentence]
-        """
+REQUIREMENTS:
+1. Artist MUST have official YouTube presence (channel, Vevo, or topic channel)
+2. Artist should be well-known for {{genre}} music
+3. Genre can be in any language (K-pop, Reggaeton, Hip Hop, etc.)
+4. Provide exact artist name as on YouTube{excluded_text}
+
+Return EXACTLY:
+ARTIST: [Artist Name]
+DESCRIPTION: [Brief 1-sentence description]"""
     )
-    return LLMChain(llm=llm, prompt=artist_prompt, output_key="artist_info")
     
+    return LLMChain(llm=llm, prompt=artist_prompt, output_key="artist_info")
+
 def create_song_finder_chain(llm: ChatOpenAI):
     """Create chain to find songs from official channel"""
     
     song_prompt = PromptTemplate(
         input_variables=["artist_name", "genre"],
-        template="""
-        Based on the artist: {artist_name}
-        
-        Suggest 3 popular songs by this artist in {genre} style that likely have official YouTube videos.
-        
-        For EACH song, provide:
-        1. Exact song title
-        2. Search query to find the video
-        
-        Format EXACTLY like this:
-        SONG 1 TITLE: [Title]
-        SONG 1 SEARCH: {artist_name} [Title] official music video
-        
-        SONG 2 TITLE: [Title]
-        SONG 2 SEARCH: {artist_name} [Title] official video
-        
-        SONG 3 TITLE: [Title]
-        SONG 3 SEARCH: {artist_name} [Title] official
-        """
+        template="""Based on artist: {artist_name}
+
+Suggest 3 popular songs by this artist in {genre} style that have official YouTube videos.
+
+For EACH song:
+1. Exact song title
+2. Search query to find video
+
+Format EXACTLY:
+SONG 1 TITLE: [Title]
+SONG 1 SEARCH: {artist_name} [Title] official music video
+
+SONG 2 TITLE: [Title]
+SONG 2 SEARCH: {artist_name} [Title] official video
+
+SONG 3 TITLE: [Title]
+SONG 3 SEARCH: {artist_name} [Title] official"""
     )
     
     return LLMChain(llm=llm, prompt=song_prompt, output_key="songs_info")
 
 # =============================================================================
-# PARSING FUNCTIONS
+# PARSING & YOUTUBE SEARCH
 # =============================================================================
 
-def parse_artists_from_output(artists_output: str) -> List[Dict]:
-    """Parse multiple artists from LLM output"""
-    artists = []
-    current_artist = {}
-    
-    for line in artists_output.strip().split('\n'):
-        line = line.strip()
-        if line.startswith("ARTIST:"):
-            if current_artist:  # Save previous artist if exists
-                artists.append(current_artist)
-            current_artist = {"name": line.replace("ARTIST:", "").strip(), "description": ""}
-        elif line.startswith("DESCRIPTION:") and current_artist:
-            current_artist["description"] = line.replace("DESCRIPTION:", "").strip()
-        elif line == "---" and current_artist:  # Separator line
-            artists.append(current_artist)
-            current_artist = {}
-    
-    # Don't forget the last artist
-    if current_artist:
-        artists.append(current_artist)
-    
-    return artists[:3]  # Return max 3 artists
-
-def parse_songs_from_output(songs_output: str, artist_name: str) -> List[Dict]:
-    """Parse songs from LLM output"""
-    songs = []
-    lines = songs_output.strip().split('\n')
-    
-    for i in range(0, len(lines), 3):
-        if i < len(lines) and "TITLE:" in lines[i]:
-            title = lines[i].split("TITLE:", 1)[1].strip()
-            search_query = ""
-            
-            if i + 1 < len(lines) and "SEARCH:" in lines[i + 1]:
-                search_query = lines[i + 1].split("SEARCH:", 1)[1].strip()
-            else:
-                search_query = f"{artist_name} {title} official music video"
-            
-            songs.append({
-                "title": title,
-                "search_query": search_query
-            })
-    
-    return songs[:3]
-
-# =============================================================================
-# YOUTUBE SEARCH FUNCTIONS (Enhanced)
-# =============================================================================
+def parse_llm_output(artist_output: str, songs_output: str) -> Dict:
+    """Parse LLM outputs into structured data"""
+    try:
+        # Parse artist
+        artist_name = ""
+        artist_desc = ""
+        
+        for line in artist_output.strip().split('\n'):
+            if line.startswith("ARTIST:"):
+                artist_name = line.replace("ARTIST:", "").strip()
+            elif line.startswith("DESCRIPTION:"):
+                artist_desc = line.replace("DESCRIPTION:", "").strip()
+        
+        # Parse songs
+        songs = []
+        lines = songs_output.strip().split('\n')
+        
+        for i in range(0, len(lines), 3):
+            if i < len(lines) and "TITLE:" in lines[i]:
+                title = lines[i].split("TITLE:", 1)[1].strip()
+                search_query = ""
+                
+                if i + 1 < len(lines) and "SEARCH:" in lines[i + 1]:
+                    search_query = lines[i + 1].split("SEARCH:", 1)[1].strip()
+                else:
+                    search_query = f"{artist_name} {title} official music video"
+                
+                songs.append({"title": title, "search_query": search_query})
+        
+        return {
+            "artist_name": artist_name,
+            "artist_description": artist_desc,
+            "songs": songs[:3]
+        }
+        
+    except Exception as e:
+        st.error(f"Error parsing output: {e}")
+        return None
 
 def search_youtube_video(search_query: str, artist_name: str) -> Optional[str]:
-    """Search for official YouTube video with enhanced filtering"""
+    """Search for official YouTube video"""
     try:
         results = YoutubeSearch(search_query, max_results=10).to_dict()
         
-        # Clean artist name for comparison
         clean_artist = re.sub(r'[^\w\s]', '', artist_name.lower())
-        
         best_match = None
         best_score = 0
         
@@ -176,28 +154,16 @@ def search_youtube_video(search_query: str, artist_name: str) -> Optional[str]:
             channel = result['channel'].lower()
             video_id = result['id']
             
-            # Calculate match score
             score = 0
-            
-            # Check if channel contains artist name
             if any(word in channel for word in clean_artist.split()):
                 score += 40
-            
-            # Official indicators
-            official_indicators = ['official', 'music video', 'mv', '【mv】']
-            if any(indicator in title for indicator in official_indicators):
+            if any(indicator in title for indicator in ['official', 'music video', 'mv']):
                 score += 30
-            
-            # Artist in title
             if any(word in title for word in clean_artist.split()):
                 score += 20
-            
-            # Avoid unofficial content
-            unofficial_indicators = ['cover', 'tribute', 'karaoke', 'instrumental', 'remix']
-            if any(indicator in title for indicator in unofficial_indicators):
+            if any(indicator in title for indicator in ['cover', 'tribute', 'karaoke']):
                 score -= 50
             
-            # Track best match
             if score > best_score:
                 best_score = score
                 best_match = video_id
@@ -205,7 +171,6 @@ def search_youtube_video(search_query: str, artist_name: str) -> Optional[str]:
         if best_match and best_score > 30:
             return f"https://www.youtube.com/watch?v={best_match}"
         elif results:
-            # Fallback to first result
             return f"https://www.youtube.com/watch?v={results[0]['id']}"
             
     except Exception as e:
@@ -214,252 +179,151 @@ def search_youtube_video(search_query: str, artist_name: str) -> Optional[str]:
     return None
 
 # =============================================================================
-# MAIN APPLICATION (Updated for multi-artist support)
+# MAIN APPLICATION
 # =============================================================================
 
 def main():
-    st.set_page_config(
-        page_title="🎵 Music Discovery Pro",
-        page_icon="🎵",
-        layout="wide"
-    )
+    st.set_page_config(page_title="🎵 Music Discovery Pro", page_icon="🎵", layout="wide")
+    
+    # Initialize session state (CRITICAL - fixes your error)
     if 'used_artists_by_genre' not in st.session_state:
-    st.session_state.used_artists_by_genre = {}
-
-    # Initialize session state
+        st.session_state.used_artists_by_genre = {}
     if 'recommendations' not in st.session_state:
         st.session_state.recommendations = []
     if 'api_key' not in st.session_state:
         st.session_state.api_key = ""
-    if 'used_artists' not in st.session_state:
-        st.session_state.used_artists = set()
-    if 'available_artists' not in st.session_state:
-        st.session_state.available_artists = []
-    if 'selected_artist_index' not in st.session_state:
-        st.session_state.selected_artist_index = 0
     
-    # Title and description
+    # UI
     st.title("🎵 Music Discovery Pro")
-    st.markdown("""
-    Discover multiple artists with official YouTube channels in any music genre.
-    Powered by **DeepSeek AI**.
-    """)
+    st.markdown("Find artists with official YouTube channels. No duplicates for the same genre!")
     
-    # DeepSeek API Key input
-    st.sidebar.header("🔑 DeepSeek API Configuration")
-    
-    with st.sidebar.expander("ℹ️ Get DeepSeek API Key"):
-        st.markdown("""
-        1. Go to [DeepSeek Platform](https://platform.deepseek.com/)
-        2. Sign up or log in
-        3. Navigate to "API Keys"
-        4. Create a new API key
-        5. Free tier available with generous limits
-        """)
-    
+    # API Key
+    st.sidebar.header("🔑 DeepSeek API")
     api_key = st.sidebar.text_input(
-        "DeepSeek API Key:",
-        type="password",
-        value=st.session_state.api_key,
-        placeholder="Enter your DeepSeek API key...",
-        help="Get your API key from https://platform.deepseek.com",
-        key="api_key_input"
+        "API Key:", type="password", value=st.session_state.api_key,
+        placeholder="Enter DeepSeek API key...", key="api_key_input"
     )
-    
-    # Store API key in session state
     if api_key:
         st.session_state.api_key = api_key
     
-    # Main interface
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        genre = st.text_input(
-            "Enter a music genre:",
-            placeholder="e.g., K-pop, Lo-fi Hip Hop, Flamenco, Vaporwave, Bhangra...",
-            key="genre_input"
-        )
+    # Genre input
+    genre = st.text_input(
+        "Enter music genre:",
+        placeholder="e.g., K-pop, Lo-fi Hip Hop, Reggaeton, Bhangra...",
+        key="genre_input"
+    )
     
-    with col2:
-        st.write("")  # Spacer
-        st.write("")  # Spacer
-        search_button = st.button(
-            "🔍 Find Artists",
-            type="primary",
-            use_container_width=True
-        )
+    search_button = st.button("🎯 Find Artist & Songs", type="primary", use_container_width=True)
     
-    # Process genre search
-    if search_button and genre:
+    # Process search
+    if search_button:
+        if not genre:
+            st.error("❌ Please enter a genre!")
+            return
         if not st.session_state.api_key:
-            st.error("❌ Please enter your DeepSeek API key in the sidebar!")
+            st.error("❌ Please enter your API key!")
             return
         
-        with st.spinner(f"🔍 Searching for a unique {genre} artist..."):
-        try:
-            # Initialize LLM
-            llm = initialize_llm(st.session_state.api_key)
-            if not llm:
-                return
-            
-            # Create chain WITH the genre context for exclusion
-            artist_chain = create_artist_finder_chain(llm, genre)
-            song_chain = create_song_finder_chain(llm)
-            
-            # Your existing SequentialChain creation...
-            full_chain = SequentialChain(...)
-            
-            # Run the chain
-            result = full_chain({"genre": genre})
-            
-            # Parse the result (your existing parse_llm_output function works)
-            parsed_result = parse_llm_output(result["artist_info"], result["songs_info"])
-            
-            if parsed_result:
-                # --- NEW: TRACK THE USED ARTIST FOR THIS GENRE ---
-                genre_key = genre.lower()
-                if genre_key not in st.session_state.used_artists_by_genre:
-                    st.session_state.used_artists_by_genre[genre_key] = []
+        with st.spinner(f"🔍 Finding unique {genre} artist..."):
+            try:
+                # Initialize LLM
+                llm = initialize_llm(st.session_state.api_key)
+                if not llm:
+                    return
                 
-                # Add the new artist to the list for this genre
-                st.session_state.used_artists_by_genre[genre_key].append(
-                    parsed_result['artist_name']
+                # Create and run chains
+                artist_chain = create_artist_finder_chain(llm, genre)
+                song_chain = create_song_finder_chain(llm)
+                
+                full_chain = SequentialChain(
+                    chains=[artist_chain, song_chain],
+                    input_variables=["genre"],
+                    output_variables=["artist_info", "songs_info"],
+                    verbose=False
                 )
                 
-                # Store available artists
-                st.session_state.available_artists = filtered_artists
-                st.session_state.selected_artist_index = 0
+                result = full_chain({"genre": genre})
                 
-                # Display available artists
-                st.success(f"✅ Found {len(filtered_artists)} unique {genre} artists!")
-                st.markdown("---")
+                # Parse and validate result
+                parsed_result = parse_llm_output(result["artist_info"], result["songs_info"])
                 
-                # Show artist selection
-                for idx, artist in enumerate(filtered_artists):
-                    with st.container():
-                        col_a, col_b = st.columns([1, 4])
-                        with col_a:
-                            if st.button(f"Select #{idx+1}", key=f"select_{idx}"):
-                                st.session_state.selected_artist_index = idx
-                                st.rerun()
-                        with col_b:
-                            st.markdown(f"**{artist['name']}**")
-                            if artist['description']:
-                                st.caption(artist['description'])
-                        st.markdown("---")
+                if not parsed_result or not parsed_result["artist_name"]:
+                    st.error("❌ Could not find artist. Please try again.")
+                    return
+                
+                # TRACK DUPLICATES
+                genre_key = genre.lower()
+                artist_clean = clean_artist_name(parsed_result["artist_name"])
+                
+                # Check if artist already used for this genre
+                if genre_key in st.session_state.used_artists_by_genre:
+                    if artist_clean in [clean_artist_name(a) for a in st.session_state.used_artists_by_genre[genre_key]]:
+                        st.warning(f"⚠️ '{parsed_result['artist_name']}' was already suggested for {genre}. Try searching again for a different artist!")
+                        return
+                
+                # Store the new artist
+                if genre_key not in st.session_state.used_artists_by_genre:
+                    st.session_state.used_artists_by_genre[genre_key] = []
+                st.session_state.used_artists_by_genre[genre_key].append(parsed_result["artist_name"])
+                
+                # Search for YouTube videos
+                for song in parsed_result["songs"]:
+                    song["youtube_url"] = search_youtube_video(song["search_query"], parsed_result["artist_name"])
+                
+                # Store recommendation
+                parsed_result["genre"] = genre
+                st.session_state.recommendations.append(parsed_result)
+                
+                # DISPLAY RESULTS
+                st.success(f"✅ Found **{parsed_result['artist_name']}**!")
+                st.markdown(f"### 🎤 {parsed_result['artist_name']}")
+                if parsed_result['artist_description']:
+                    st.info(parsed_result['artist_description'])
+                
+                st.markdown("### 🎵 Recommended Songs")
+                for idx, song in enumerate(parsed_result['songs'], 1):
+                    col1, col2 = st.columns([3, 1])
+                    with col1:
+                        st.markdown(f"**{idx}. {song['title']}**")
+                    with col2:
+                        if song.get('youtube_url'):
+                            st.markdown(f'<a href="{song["youtube_url"]}" target="_blank"><button style="background-color: #FF0000; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer;">▶️ Watch</button></a>', unsafe_allow_html=True)
+                    
+                    if song.get('youtube_url'):
+                        try:
+                            st.video(song['youtube_url'])
+                        except:
+                            st.markdown(f"[Open in YouTube]({song['youtube_url']})")
+                    st.divider()
                 
             except Exception as e:
-                st.error(f"❌ Error finding artists: {str(e)}")
+                st.error(f"❌ Error: {str(e)}")
     
-    # Display songs for selected artist
-    if st.session_state.available_artists and genre:
-        selected_idx = st.session_state.selected_artist_index
-        if selected_idx < len(st.session_state.available_artists):
-            selected_artist = st.session_state.available_artists[selected_idx]
-            
-            st.markdown(f"### 🎤 Selected: **{selected_artist['name']}**")
-            if selected_artist['description']:
-                st.info(selected_artist['description'])
-            
-            if st.button("🎵 Get Songs for This Artist", type="secondary"):
-                with st.spinner(f"Finding songs for {selected_artist['name']}..."):
-                    try:
-                        # Initialize LLM
-                        llm = initialize_llm(st.session_state.api_key)
-                        if not llm:
-                            return
-                        
-                        # Create song finder chain
-                        song_chain = create_song_finder_chain(llm)
-                        songs_result = song_chain.run({
-                            "artist_name": selected_artist["name"],
-                            "genre": genre
-                        })
-                        
-                        songs = parse_songs_from_output(songs_result, selected_artist["name"])
-                        
-                        # Search for YouTube videos
-                        for idx, song in enumerate(songs, 1):
-                            youtube_url = search_youtube_video(song["search_query"], selected_artist["name"])
-                            song["youtube_url"] = youtube_url
-                        
-                        # Store in recommendations
-                        recommendation = {
-                            "genre": genre,
-                            "artist_name": selected_artist["name"],
-                            "artist_description": selected_artist["description"],
-                            "songs": songs
-                        }
-                        st.session_state.recommendations.append(recommendation)
-                        
-                        # Mark artist as used
-                        clean_name = clean_artist_name(selected_artist["name"])
-                        st.session_state.used_artists.add(clean_name)
-                        
-                        # Display results
-                        st.markdown("### 🎵 Recommended Songs")
-                        
-                        for idx, song in enumerate(songs, 1):
-                            col1, col2 = st.columns([3, 1])
-                            
-                            with col1:
-                                st.markdown(f"**{idx}. {song['title']}**")
-                                with st.expander("🔍 Search Query"):
-                                    st.code(song['search_query'], language=None)
-                            
-                            with col2:
-                                if song.get('youtube_url'):
-                                    st.markdown(
-                                        f'<a href="{song["youtube_url"]}" target="_blank">'
-                                        '<button style="background-color: #FF0000; color: white; '
-                                        'border: none; padding: 8px 16px; border-radius: 4px; '
-                                        'cursor: pointer;">▶️ Watch</button></a>',
-                                        unsafe_allow_html=True
-                                    )
-                                else:
-                                    st.warning("Video not found")
-                            
-                            if song.get('youtube_url'):
-                                try:
-                                    st.video(song['youtube_url'])
-                                except:
-                                    st.markdown(f"[Open in YouTube]({song['youtube_url']})")
-                            
-                            st.divider()
-                        
-                    except Exception as e:
-                        st.error(f"❌ Error getting songs: {str(e)}")
-    
-    # Session management
+    # Session management sidebar
     st.sidebar.markdown("---")
     st.sidebar.markdown("### 🛠️ Session Tools")
     
-    if st.sidebar.button("🔄 Reset Used Artists", type="secondary"):
-        st.session_state.used_artists = set()
-        st.session_state.available_artists = []
-        st.success("Artist history cleared!")
-        st.rerun()
+    if st.sidebar.button("🗑️ Clear History for Current Genre", key="clear_genre"):
+        if genre:
+            genre_key = genre.lower()
+            if genre_key in st.session_state.used_artists_by_genre:
+                st.session_state.used_artists_by_genre[genre_key] = []
+                st.sidebar.success(f"Cleared history for '{genre}'!")
+        else:
+            st.sidebar.warning("Enter a genre first.")
     
-    # Display previous recommendations
+    if st.sidebar.button("🗑️ Clear All Genre History", key="clear_all"):
+        st.session_state.used_artists_by_genre = {}
+        st.sidebar.success("Cleared all history!")
+    
+    # Previous searches
     if st.session_state.recommendations:
         st.sidebar.markdown("---")
         st.sidebar.markdown("### 📚 Previous Searches")
-        
-        for i, rec in enumerate(reversed(st.session_state.recommendations[-10:])):
-            with st.sidebar.expander(f"{rec['artist_name']} ({rec.get('genre', 'Unknown')})"):
-                st.write(f"**Genre:** {rec['genre']}")
+        for rec in reversed(st.session_state.recommendations[-5:]):
+            with st.sidebar.expander(f"{rec['artist_name']} ({rec['genre']})"):
                 st.write(f"**Artist:** {rec['artist_name']}")
-                st.write(f"**Songs found:** {len(rec['songs'])}")
-    
-    # DeepSeek info
-    with st.sidebar.expander("📊 About DeepSeek"):
-        st.markdown("""
-        **Tips for best results:**
-        1. Be specific with genres (e.g., "Japanese City Pop" vs "City Pop")
-        2. The app now suggests multiple artists per search
-        3. Click "Reset Used Artists" to clear the duplicate filter
-        4. Each artist can be selected individually for song recommendations
-        """)
+                st.write(f"**Songs:** {len(rec['songs'])}")
 
 if __name__ == "__main__":
     main()
-
