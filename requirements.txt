@@ -1,8 +1,7 @@
-streamlit==1.28.0
-langchain==0.0.340
-langchain-community==0.0.10
-langchain-core==0.0.29
-langchain-openai==0.0.5
+
+streamlit>=1.28.0
+langchain==0.0.354
+langchain-openai==0.0.8
+langchain-core==0.1.23
 youtube-search==2.1.2
 httpx==0.25.0
-
