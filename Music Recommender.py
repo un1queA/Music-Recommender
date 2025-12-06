@@ -1,5 +1,5 @@
 # prerequisites:
-# pip install langchain openai langchain-community youtube-search streamlit
+# pip install langchain-openai youtube-search streamlit httpx
 # Run: streamlit run app.py
 
 import streamlit as st
@@ -8,28 +8,35 @@ import re
 from typing import List, Dict, Optional
 from youtube_search import YoutubeSearch
 
-# Import LangChain components
-from langchain.chat_models import ChatOpenAI
+# Import LangChain components - updated for DeepSeek
+from langchain_openai import ChatOpenAI  # Compatible with OpenAI format
 from langchain.prompts import PromptTemplate
 from langchain.chains import LLMChain, SequentialChain
 
 # =============================================================================
-# LLM CHAINS & PROMPT TEMPLATES
+# DEEPSEEK API CONFIGURATION
 # =============================================================================
 
 def initialize_llm(api_key: str):
-    """Initialize the LLM with the provided API key"""
+    """Initialize the LLM with DeepSeek API"""
     try:
+        # DeepSeek uses OpenAI-compatible API format
         llm = ChatOpenAI(
-            model="gpt-4", 
+            model="deepseek-chat",  # Use "deepseek-chat" for latest model
             temperature=0.7,
             openai_api_key=api_key,
-            max_tokens=1000
+            openai_api_base="https://api.deepseek.com",  # DeepSeek API endpoint
+            max_tokens=1000,
+            timeout=30  # Add timeout for reliability
         )
         return llm
     except Exception as e:
-        st.error(f"Failed to initialize OpenAI: {e}")
+        st.error(f"Failed to initialize DeepSeek API: {e}")
         return None
+
+# =============================================================================
+# PROMPT TEMPLATES (Optimized for DeepSeek)
+# =============================================================================
 
 def create_artist_finder_chain(llm: ChatOpenAI):
     """Create chain to find artist with official YouTube channel"""
@@ -37,17 +44,17 @@ def create_artist_finder_chain(llm: ChatOpenAI):
     artist_prompt = PromptTemplate(
         input_variables=["genre"],
         template="""
-        Find an artist who has an OFFICIAL YouTube channel and specializes in {genre} music.
+        You are a music expert. Find an artist who specializes in {genre} music and has an official YouTube channel.
         
-        IMPORTANT REQUIREMENTS:
-        1. The artist MUST have an official, verified YouTube channel
-        2. The artist should be known for {genre} music
-        3. The genre can be in any language (not just English)
-        4. Provide the exact artist name as it appears on YouTube
+        IMPORTANT:
+        1. The artist MUST have an official YouTube presence (channel or Vevo)
+        2. Artist should be known for {genre} music
+        3. Genre can be in any language
+        4. Provide accurate information
         
-        Return in this format:
+        Return EXACTLY in this format:
         ARTIST: [Artist Name]
-        DESCRIPTION: [Brief description of the artist and their YouTube channel]
+        DESCRIPTION: [Brief description]
         """
     )
     
@@ -59,30 +66,30 @@ def create_song_finder_chain(llm: ChatOpenAI):
     song_prompt = PromptTemplate(
         input_variables=["artist_info", "genre"],
         template="""
-        Based on this artist information: {artist_info}
+        Based on: {artist_info}
         
-        Find 3 songs from their OFFICIAL YouTube channel that represent {genre} music.
+        Suggest 3 popular songs by this artist in {genre} style that likely have official YouTube videos.
         
         For EACH song, provide:
-        1. The exact song title as it appears on YouTube
-        2. A search query that will find the official video on YouTube
+        1. Exact song title
+        2. Search query to find the video
         
-        Format exactly like this:
+        Format EXACTLY like this:
         SONG 1 TITLE: [Title]
-        SONG 1 SEARCH: [Artist Name] [Song Title] official music video
+        SONG 1 SEARCH: [Artist] [Title] official
         
         SONG 2 TITLE: [Title]
-        SONG 2 SEARCH: [Artist Name] [Song Title] official video
+        SONG 2 SEARCH: [Artist] [Title] official music video
         
         SONG 3 TITLE: [Title]
-        SONG 3 SEARCH: [Artist Name] [Song Title] official
+        SONG 3 SEARCH: [Artist] [Title] official video
         """
     )
     
     return LLMChain(llm=llm, prompt=song_prompt, output_key="songs_info")
 
 # =============================================================================
-# YOUTUBE SEARCH FUNCTIONS
+# YOUTUBE SEARCH FUNCTIONS (No changes needed)
 # =============================================================================
 
 def search_youtube_video(search_query: str, artist_name: str) -> Optional[str]:
@@ -199,7 +206,7 @@ def parse_llm_output(artist_output: str, songs_output: str) -> Dict:
         return None
 
 # =============================================================================
-# MAIN APPLICATION
+# MAIN APPLICATION (Updated for DeepSeek)
 # =============================================================================
 
 def main():
@@ -219,17 +226,28 @@ def main():
     st.title("🎵 Music Discovery Pro")
     st.markdown("""
     Discover artists with official YouTube channels in any music genre.
-    Enter a genre below to get started!
+    Powered by **DeepSeek AI**.
     """)
     
-    # API Key input
-    st.sidebar.header("🔑 API Configuration")
+    # DeepSeek API Key input
+    st.sidebar.header("🔑 DeepSeek API Configuration")
+    
+    # Instructions for getting DeepSeek API key
+    with st.sidebar.expander("ℹ️ Get DeepSeek API Key"):
+        st.markdown("""
+        1. Go to [DeepSeek Platform](https://platform.deepseek.com/)
+        2. Sign up or log in
+        3. Navigate to "API Keys"
+        4. Create a new API key
+        5. Free tier available with generous limits
+        """)
+    
     api_key = st.sidebar.text_input(
-        "OpenAI API Key:",
+        "DeepSeek API Key:",
         type="password",
         value=st.session_state.api_key,
-        placeholder="sk-...",
-        help="Get your API key from https://platform.openai.com/api-keys",
+        placeholder="Enter your DeepSeek API key...",
+        help="Get your API key from https://platform.deepseek.com",
         key="api_key_input"
     )
     
@@ -260,16 +278,16 @@ def main():
             st.error("❌ Please enter a music genre!")
             return
         
-        if not st.session_state.api_key or not st.session_state.api_key.startswith('sk-'):
-            st.error("❌ Please enter a valid OpenAI API key in the sidebar!")
+        if not st.session_state.api_key:
+            st.error("❌ Please enter your DeepSeek API key in the sidebar!")
             return
         
-        with st.spinner(f"🔍 Searching for {genre} artists with official YouTube channels..."):
+        with st.spinner(f"🔍 Searching for {genre} artists with DeepSeek AI..."):
             try:
                 # Initialize LLM with API key
                 llm = initialize_llm(st.session_state.api_key)
                 if not llm:
-                    st.error("❌ Failed to initialize OpenAI. Please check your API key.")
+                    st.error("❌ Failed to initialize DeepSeek. Please check your API key.")
                     return
                 
                 # Create chains
@@ -281,14 +299,14 @@ def main():
                     chains=[artist_chain, song_chain],
                     input_variables=["genre"],
                     output_variables=["artist_info", "songs_info"],
-                    verbose=True
+                    verbose=False  # Set to True for debugging
                 )
                 
                 # Run chain
                 result = full_chain({"genre": genre})
                 
-                # Debug: Show raw output
-                with st.expander("🔍 Debug: Raw LLM Output"):
+                # Debug: Show raw output (optional)
+                with st.expander("🔍 Debug: Raw AI Output"):
                     st.write("**Artist Info:**")
                     st.code(result["artist_info"])
                     st.write("**Songs Info:**")
@@ -302,7 +320,7 @@ def main():
                 
                 if parsed_result:
                     # Store in session state
-                    parsed_result["genre"] = genre  # Add genre for reference
+                    parsed_result["genre"] = genre
                     st.session_state.recommendations.append(parsed_result)
                     
                     # Display results
@@ -365,8 +383,23 @@ def main():
                 
                 # Add a button to reload this recommendation
                 if st.button(f"Load", key=f"load_{i}"):
-                    # You could implement loading functionality here
                     st.info("Click the main search button with a new genre to search again!")
+    
+    # Add DeepSeek specific info
+    with st.sidebar.expander("📊 About DeepSeek"):
+        st.markdown("""
+        **DeepSeek AI Features:**
+        - Free tier with generous limits
+        - OpenAI-compatible API
+        - Good music knowledge
+        - Fast response times
+        
+        **Tips for best results:**
+        1. Be specific with genres
+        2. Try both English and non-English genres
+        3. For niche genres, add descriptors
+           (e.g., "Japanese City Pop" instead of just "City Pop")
+        """)
 
 if __name__ == "__main__":
     main()
