@@ -1,11 +1,19 @@
+# requirements.txt
+# Core app framework
 streamlit==1.31.0
-langchain>=1.0.0
-langchain-openai>=0.1.0
-langchain-core>=0.1.0
+
+# LangChain - Compatible set for DeepSeek API (OpenAI-compatible)
+langchain==0.1.20
+langchain-openai==0.1.7
+langchain-core==0.1.52
+
+# App-specific dependencies
 youtube-search==2.1.2
 httpx==0.25.0
 
-
-
-
-
+# Critical downstream dependencies (pinned for compatibility)
+openai==1.12.0
+tqdm==4.66.2
+typing-extensions==4.9.0
+requests==2.31.0
+urllib3==1.26.18
