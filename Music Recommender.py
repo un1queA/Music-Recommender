@@ -5,7 +5,8 @@
 import streamlit as st
 import os
 import re
-from typing import Dict, Optional
+import random
+from typing import Dict, Optional, List, Tuple
 from youtube_search import YoutubeSearch
 
 # Import LangChain components
@@ -39,38 +40,69 @@ def clean_artist_name(artist: str) -> str:
     clean_name = re.sub(r'[^\w\s]', '', clean_name).lower()
     return clean_name
 
+def is_similar_artist(artist1: str, artist2: str) -> bool:
+    """Check if two artist names are similar (avoid Stray Kids vs Stray Kids (K-pop))"""
+    clean1 = clean_artist_name(artist1)
+    clean2 = clean_artist_name(artist2)
+    
+    # Check exact match
+    if clean1 == clean2:
+        return True
+    
+    # Check if one contains the other (common for variations)
+    if clean1 in clean2 or clean2 in clean1:
+        # But don't match too short names (like "A" in "ABBA")
+        if len(clean1) > 3 and len(clean2) > 3:
+            return True
+    
+    return False
+
 # =============================================================================
-# PROMPT TEMPLATES (UPDATED FOR ENDLESS SEARCH)
+# PROMPT TEMPLATES (UPDATED FOR BETTER DUPLICATE PREVENTION)
 # =============================================================================
 
-def create_artist_prompt(genre: str, excluded_artists: list, attempt_count: int) -> PromptTemplate:
-    """Create prompt template for finding artists - adapts based on attempt count"""
+def create_artist_prompt(genre: str, excluded_artists: List[str], search_count: int) -> PromptTemplate:
+    """Create prompt template for finding artists - adapts based on search count"""
     
+    # Determine if we should require official channel
+    require_official = search_count < 50  # Require official for first 50 searches
+    
+    # Prepare exclusion list for prompt (limit to 30 to avoid token limits)
     excluded_text = ""
     if excluded_artists:
-        # Show only last 5 to avoid overwhelming the AI
-        excluded_text = f"\nDo not suggest these artists: {', '.join(excluded_artists[-5:])}."
+        # Use a representative sample, not just the last few
+        sample_size = min(30, len(excluded_artists))
+        
+        # Get a mix: recent + some older ones
+        if len(excluded_artists) > sample_size:
+            # Take 20 recent and 10 random from older ones
+            recent = excluded_artists[-20:]
+            older_sample = random.sample(excluded_artists[:-20], min(10, len(excluded_artists)-20))
+            sample = list(set(recent + older_sample))[:sample_size]
+        else:
+            sample = excluded_artists
+        
+        excluded_text = f"\nDO NOT suggest these artists: {', '.join(sample)}."
     
-    # Tiered approach: First 10 searches require official channels, then relax requirements
-    if attempt_count <= 10:
-        # STRICT MODE: Official channel required
-        channel_requirement = "Artist MUST have an official YouTube presence (channel, Vevo, or official topic channel)"
+    # Determine prompt based on search count
+    if require_official:
+        channel_requirement = "Artist MUST have an official YouTube presence (channel, Vevo, or official topic channel) with official music videos."
     else:
-        # RELAXED MODE: Artist may not have official channel
-        channel_requirement = "Artist may or may not have an official YouTube channel. If they don't, that's okay - just mention they're a great {genre} artist."
+        # After 50 searches, relax requirements
+        channel_requirement = "Artist may or may not have an official YouTube channel. It's acceptable if they don't have official videos."
     
     template = f"""You are a music expert. Find ONE artist who specializes in {{genre}} music.
     
-REQUIREMENTS:
+IMPORTANT REQUIREMENTS:
 1. {channel_requirement}
 2. Artist should be well-known or emerging in {{genre}} music
 3. Genre can be in any language (K-pop, J-pop, Reggaeton, Hip Hop, Bhangra, etc.)
-4. Provide the exact artist name{excluded_text}
+4. Suggest an artist that hasn't been suggested before for this genre{excluded_text}
 
 Return EXACTLY in this format:
 ARTIST: [Artist Name]
 DESCRIPTION: [Brief 1-2 sentence description]
-HAS_OFFICIAL_CHANNEL: [Yes/No - based on your knowledge]"""
+HAS_OFFICIAL_CHANNEL: [Yes/No - be honest about this]"""
 
     return PromptTemplate(input_variables=["genre"], template=template)
 
@@ -81,24 +113,26 @@ def create_song_prompt() -> PromptTemplate:
 
 Find 3 popular or representative songs by this artist in {genre} style.
 
+IMPORTANT: Provide EXACT song titles as they appear on official releases.
+
 For EACH song, provide:
 1. The exact song title
-2. A search query that might find the video (official or unofficial)
+2. A search query that will find the CORRECT video
 
 Format EXACTLY like this:
 SONG 1 TITLE: [Title]
-SONG 1 SEARCH: [Artist Name] [Song Title]
+SONG 1 SEARCH: [Artist Name] "[Song Title]" official music video
 
 SONG 2 TITLE: [Title]
-SONG 2 SEARCH: [Artist Name] [Song Title]
+SONG 2 SEARCH: [Artist Name] "[Song Title]" official
 
 SONG 3 TITLE: [Title]
-SONG 3 SEARCH: [Artist Name] [Song Title]"""
+SONG 3 SEARCH: [Artist Name] "[Song Title]" mv"""
 
     return PromptTemplate(input_variables=["artist_info", "genre"], template=template)
 
 # =============================================================================
-# PARSING FUNCTIONS (UPDATED)
+# PARSING FUNCTIONS
 # =============================================================================
 
 def extract_artist_info(artist_output: str) -> Dict:
@@ -114,7 +148,6 @@ def extract_artist_info(artist_output: str) -> Dict:
         elif line.startswith("DESCRIPTION:"):
             artist_desc = line.replace("DESCRIPTION:", "").strip()
         elif "has_official_channel:" in line_lower:
-            # Extract Yes/No value
             parts = line.split(":", 1)
             if len(parts) > 1:
                 has_official_channel = parts[1].strip()
@@ -125,7 +158,7 @@ def extract_artist_info(artist_output: str) -> Dict:
         "has_official_channel": has_official_channel
     }
 
-def extract_songs_info(songs_output: str, artist_name: str) -> list:
+def extract_songs_info(songs_output: str, artist_name: str) -> List[Dict]:
     """Extract song information from LLM output"""
     songs = []
     lines = songs_output.strip().split('\n')
@@ -138,30 +171,40 @@ def extract_songs_info(songs_output: str, artist_name: str) -> list:
             if i + 1 < len(lines) and "SEARCH:" in lines[i + 1]:
                 search_query = lines[i + 1].split("SEARCH:", 1)[1].strip()
             else:
-                search_query = f"{artist_name} {title}"
+                # Default search with quotes for exact match
+                search_query = f'{artist_name} "{title}" official music video'
             
             songs.append({
                 "title": title,
                 "search_query": search_query,
-                "is_official": False  # Default, will update after search
+                "is_official": False
             })
     
     return songs[:3]
 
 # =============================================================================
-# YOUTUBE SEARCH (UPDATED)
+# IMPROVED YOUTUBE SEARCH WITH STRICT MATCHING
 # =============================================================================
 
-def search_youtube_video(search_query: str, artist_name: str, expect_official: bool = True) -> Dict:
-    """Search for YouTube video and return detailed results"""
+def search_youtube_video(search_query: str, artist_name: str, song_title: str, expect_official: bool = True) -> Dict:
+    """Search for YouTube video with strict matching to ensure correct song"""
     try:
-        results = YoutubeSearch(search_query, max_results=10).to_dict()
+        # Add quotes for exact phrase search
+        if '"' not in search_query:
+            search_query = f'"{song_title}" {artist_name}'
+        
+        results = YoutubeSearch(search_query, max_results=15).to_dict()
         
         clean_artist = re.sub(r'[^\w\s]', '', artist_name.lower())
+        clean_song = re.sub(r'[^\w\s]', '', song_title.lower())
+        
         best_match = None
-        best_score = 0
+        best_score = -1000  # Start negative to require minimum quality
         best_is_official = False
-        all_videos = []
+        best_title = ""
+        
+        official_indicators = ['official', 'music video', 'mv', '【mv】', 'vevo', 'official video']
+        unofficial_indicators = ['cover', 'tribute', 'karaoke', 'fan made', 'lyrics', 'lyric', '1 hour', 'loop']
         
         for result in results:
             title = result['title'].lower()
@@ -172,67 +215,83 @@ def search_youtube_video(search_query: str, artist_name: str, expect_official: b
             # Calculate relevance score
             score = 0
             
-            # Artist name in channel (strong indicator)
-            if any(word in channel for word in clean_artist.split()):
-                score += 40
+            # CRITICAL: Song title must be in video title (with some flexibility)
+            song_words = set(clean_song.split())
+            title_words = set(re.sub(r'[^\w\s]', '', title).split())
+            common_words = song_words.intersection(title_words)
             
-            # Official indicators in title
-            official_indicators = ['official', 'music video', 'mv', '【mv】', 'vevo']
+            if len(song_words) > 0:
+                title_match_ratio = len(common_words) / len(song_words)
+                if title_match_ratio >= 0.7:  # At least 70% match
+                    score += int(100 * title_match_ratio)
+                else:
+                    # Skip videos that don't match the song title
+                    continue
+            
+            # Artist name in channel (very strong indicator of official)
+            if any(word in channel for word in clean_artist.split()):
+                score += 60  # Increased weight
+            
+            # Official indicators
             is_official = any(indicator in title for indicator in official_indicators)
             if is_official:
-                score += 30
-                best_is_official = True
+                score += 40
             
             # Artist name in title
             if any(word in title for word in clean_artist.split()):
                 score += 20
             
+            # Length check (avoid 1-hour loops, etc.)
+            duration = result.get('duration', '')
+            if ':' in duration:
+                try:
+                    mins, secs = map(int, duration.split(':'))
+                    total_seconds = mins * 60 + secs
+                    # Penalize very long videos (likely loops/compilations)
+                    if total_seconds > 600:  # > 10 minutes
+                        score -= 30
+                except:
+                    pass
+            
             # Penalize unofficial content if we expect official
             if expect_official:
-                unofficial_indicators = ['cover', 'tribute', 'karaoke', 'fan made']
                 if any(indicator in title for indicator in unofficial_indicators):
-                    score -= 50
-            
-            # Store video info
-            all_videos.append({
-                "url": video_url,
-                "title": result['title'],
-                "channel": result['channel'],
-                "score": score,
-                "is_official": is_official
-            })
+                    score -= 80  # Heavy penalty for unofficial when expecting official
             
             # Update best match
             if score > best_score:
                 best_score = score
                 best_match = video_url
+                best_is_official = is_official
+                best_title = result['title']
         
-        # Return detailed results
-        if best_match and best_score > 20:  # Lower threshold for relaxed mode
+        # Determine if we found a good match
+        if best_match and best_score >= 80:  # Higher threshold for quality
             return {
                 "url": best_match,
                 "is_official": best_is_official,
                 "score": best_score,
-                "all_results": all_videos[:3],  # Top 3 alternatives
+                "title": best_title,
                 "found": True
             }
-        elif results:
-            # Return first result as fallback
+        elif best_match and best_score >= 40:  # Lower quality but still acceptable
             return {
-                "url": f"https://www.youtube.com/watch?v={results[0]['id']}",
-                "is_official": any(ind in results[0]['title'].lower() for ind in official_indicators),
-                "score": 10,
-                "all_results": all_videos[:3],
+                "url": best_match,
+                "is_official": best_is_official,
+                "score": best_score,
+                "title": best_title,
                 "found": True
             }
+        else:
+            return {"url": None, "is_official": False, "score": 0, "title": "", "found": False}
             
     except Exception as e:
         st.warning(f"YouTube search error: {str(e)[:100]}")
     
-    return {"url": None, "is_official": False, "score": 0, "all_results": [], "found": False}
+    return {"url": None, "is_official": False, "score": 0, "title": "", "found": False}
 
 # =============================================================================
-# MAIN APPLICATION (UPDATED FOR ENDLESS SEARCH)
+# MAIN APPLICATION (UPDATED FOR STRICT DUPLICATE PREVENTION)
 # =============================================================================
 
 def main():
@@ -255,20 +314,11 @@ def main():
     # UI Header
     st.title("🎵 Music Discovery Pro")
     st.markdown("""
-    Discover artists in any music genre. Searches never end - we'll always find you someone new!
+    Discover artists in any music genre. No duplicate artists for the same genre!
     """)
     
     # API Configuration
     st.sidebar.header("🔑 DeepSeek API Configuration")
-    with st.sidebar.expander("ℹ️ Get API Key"):
-        st.markdown("""
-        1. Visit [DeepSeek Platform](https://platform.deepseek.com/)
-        2. Sign up or log in
-        3. Go to "API Keys" section
-        4. Create and copy your API key
-        5. Free tier available with generous limits
-        """)
-    
     api_key = st.sidebar.text_input(
         "DeepSeek API Key:",
         type="password",
@@ -289,13 +339,11 @@ def main():
     )
     
     # Search Button
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col2:
-        search_button = st.button(
-            "🎯 Find Artist & Songs",
-            type="primary",
-            use_container_width=True
-        )
+    search_button = st.button(
+        "🎯 Find Artist & Songs",
+        type="primary",
+        use_container_width=True
+    )
     
     # Process Search
     if search_button:
@@ -323,16 +371,16 @@ def main():
                 search_count = st.session_state.search_counts_by_genre[genre_key] + 1
                 st.session_state.search_counts_by_genre[genre_key] = search_count
                 
-                # Get excluded artists
+                # Get all excluded artists for this genre
                 excluded_artists = st.session_state.used_artists_by_genre.get(genre_key, [])
                 
-                # Try multiple times if we get a duplicate
-                max_attempts = 3
+                # Try to find a new artist (up to 5 attempts)
+                max_attempts = 5
                 artist_info = None
                 artist_name = ""
                 
                 for attempt in range(max_attempts):
-                    # Chain 1: Find Artist (adapts based on search count)
+                    # Create prompt based on search count
                     artist_prompt = create_artist_prompt(genre, excluded_artists, search_count)
                     artist_chain = LLMChain(llm=llm, prompt=artist_prompt)
                     artist_result = artist_chain.run({"genre": genre})
@@ -344,19 +392,38 @@ def main():
                     if not artist_name:
                         continue
                     
-                    # Check if this is a duplicate
-                    clean_new_artist = clean_artist_name(artist_name)
-                    existing_clean = [clean_artist_name(a) for a in excluded_artists]
+                    # Check if this is a duplicate (using improved similarity check)
+                    is_duplicate = False
+                    for existing_artist in excluded_artists:
+                        if is_similar_artist(artist_name, existing_artist):
+                            is_duplicate = True
+                            break
                     
-                    if clean_new_artist not in existing_clean:
+                    if not is_duplicate:
                         break
                     elif attempt < max_attempts - 1:
-                        st.info(f"Found duplicate '{artist_name}'. Trying again...")
+                        # Add to temporary exclusion for next attempt
                         excluded_artists.append(artist_name)
                 
+                # If we still got a duplicate after all attempts
                 if not artist_name:
-                    st.error("❌ Could not find a suitable artist. Please try again.")
+                    st.error("❌ Could not find a new artist. Please try a different genre.")
                     return
+                
+                # Final duplicate check
+                is_final_duplicate = False
+                for existing_artist in st.session_state.used_artists_by_genre.get(genre_key, []):
+                    if is_similar_artist(artist_name, existing_artist):
+                        is_final_duplicate = True
+                        break
+                
+                if is_final_duplicate:
+                    st.warning(f"⚠️ '{artist_name}' was already suggested for {genre}. Please try searching again!")
+                    return
+                
+                # Determine if we should expect official videos
+                has_claimed_official = artist_info.get("has_official_channel", "").lower() == "yes"
+                expect_official = has_claimed_official and search_count < 50
                 
                 # Chain 2: Find Songs
                 song_prompt = create_song_prompt()
@@ -369,10 +436,6 @@ def main():
                 # Extract songs
                 songs = extract_songs_info(songs_result, artist_name)
                 
-                # Determine if we should expect official videos
-                expect_official = search_count <= 15  # First 15 searches expect official
-                has_claimed_official = artist_info.get("has_official_channel", "").lower() == "yes"
-                
                 # Search for YouTube videos
                 official_videos_found = 0
                 unofficial_videos_found = 0
@@ -381,14 +444,16 @@ def main():
                 for song in songs:
                     video_result = search_youtube_video(
                         song["search_query"], 
-                        artist_name, 
-                        expect_official=expect_official or has_claimed_official
+                        artist_name,
+                        song["title"],
+                        expect_official=expect_official
                     )
                     
                     if video_result["found"]:
                         song["youtube_url"] = video_result["url"]
                         song["is_official"] = video_result["is_official"]
-                        song["alternative_videos"] = video_result["all_results"]
+                        song["video_title"] = video_result["title"]
+                        song["match_score"] = video_result["score"]
                         
                         if video_result["is_official"]:
                             official_videos_found += 1
@@ -397,6 +462,7 @@ def main():
                     else:
                         song["youtube_url"] = None
                         song["is_official"] = False
+                        song["video_title"] = ""
                         no_videos_found += 1
                 
                 # Store in session state
@@ -429,12 +495,11 @@ def main():
                 total_suggested = len(st.session_state.used_artists_by_genre[genre_key])
                 st.caption(f"*Search #{search_count} for {genre} | Total unique artists: {total_suggested}*")
                 
-                # Warning if artist doesn't have official channel
-                if not has_claimed_official and search_count > 10:
+                # Special message for fallback mode (after 50 searches)
+                if search_count >= 50 and not has_claimed_official:
                     st.warning("""
-                    ⚠️ **Note**: This artist may not have an official YouTube channel with music videos. 
-                    This is common for emerging artists, niche genres, or artists who use different platforms.
-                    We'll show available videos, which might be fan uploads or lyric videos.
+                    ⚠️ **Note**: After 50+ searches for this genre, we're now suggesting artists that may not have official YouTube channels.
+                    This is normal when exploring less mainstream artists or niche sub-genres.
                     """)
                 
                 st.markdown("### 🎵 Recommended Songs")
@@ -444,21 +509,25 @@ def main():
                     col_song_title, col_song_action = st.columns([3, 1])
                     
                     with col_song_title:
+                        # Show match quality
+                        if song.get("match_score", 0) >= 80:
+                            match_text = "🟢 Good match"
+                        elif song.get("match_score", 0) >= 40:
+                            match_text = "🟡 Fair match"
+                        else:
+                            match_text = "🔴 Poor match"
+                        
                         status_badge = ""
                         if song.get("is_official"):
-                            status_badge = " 🟢 Official"
+                            status_badge = " | 🎬 Official"
                         elif song.get("youtube_url"):
-                            status_badge = " 🟡 Unofficial"
-                        else:
-                            status_badge = " 🔴 Not Found"
+                            status_badge = " | 📹 Unofficial"
                         
-                        st.markdown(f"**{idx}. {song['title']}**{status_badge}")
+                        st.markdown(f"**{idx}. {song['title']}** {match_text}{status_badge}")
                         
-                        if song.get("alternative_videos") and not song.get("is_official"):
-                            with st.expander("🔍 Alternative Videos"):
-                                for alt in song["alternative_videos"]:
-                                    official_tag = " (Official)" if alt["is_official"] else ""
-                                    st.write(f"- [{alt['title']}]({alt['url']}){official_tag}")
+                        # Show actual video title if different from song title
+                        if song.get("video_title") and song["title"].lower() not in song["video_title"].lower():
+                            st.caption(f"Video found: *{song['video_title']}*")
                     
                     with col_song_action:
                         if song.get('youtube_url'):
@@ -474,12 +543,14 @@ def main():
                             )
                         else:
                             st.error("❌ No video found")
-                            st.caption("""
-                            *Why no video?*
-                            - Artist may not have official YouTube presence
-                            - Videos might be region-restricted
-                            - Content may be on other platforms (Spotify, Apple Music)
-                            """)
+                            if not has_claimed_official and search_count >= 50:
+                                st.caption("""
+                                *Why no official video?*
+                                - This artist doesn't maintain an official YouTube channel
+                                - Their music may be available on other platforms (Spotify, Apple Music, SoundCloud)
+                                - They might be an emerging artist without video production
+                                - Consider searching on streaming platforms instead
+                                """)
                     
                     # Display video if available
                     if song.get('youtube_url'):
@@ -490,12 +561,15 @@ def main():
                     
                     st.divider()
                 
-                # Final summary
-                if official_videos_found == 0 and unofficial_videos_found > 0:
+                # Summary for fallback artists
+                if not has_claimed_official and search_count >= 50:
                     st.info("""
-                    📝 **About These Videos**: 
-                    The videos shown are unofficial uploads (covers, lyric videos, fan uploads). 
-                    To support this artist, consider streaming their music on platforms like Spotify, Apple Music, or their official website.
+                    💡 **About This Artist**: 
+                    This artist doesn't have official YouTube videos. To listen to their music:
+                    1. Check streaming platforms (Spotify, Apple Music, etc.)
+                    2. Search for live performances or interviews
+                    3. Look for their music on SoundCloud or Bandcamp
+                    4. Check if they have an official website
                     """)
                 
             except Exception as e:
@@ -517,9 +591,10 @@ def main():
         st.sidebar.markdown("---")
         st.sidebar.markdown("### 📊 Search Statistics")
         
-        for genre_key, count in st.session_state.search_counts_by_genre.items():
+        for genre_key, count in list(st.session_state.search_counts_by_genre.items())[-5:]:
             artist_count = len(st.session_state.used_artists_by_genre.get(genre_key, []))
-            st.sidebar.write(f"**{genre_key.title()}**: {count} searches, {artist_count} unique artists")
+            mode = "Official" if count < 50 else "Fallback"
+            st.sidebar.write(f"**{genre_key.title()}**: {artist_count} artists ({mode} mode)")
     
     # Previous Searches
     if st.session_state.recommendations:
@@ -528,39 +603,17 @@ def main():
         
         for i, rec in enumerate(reversed(st.session_state.recommendations[-5:])):
             with st.sidebar.expander(f"{rec['artist_name']} ({rec['genre']})"):
-                st.write(f"**Genre:** {rec['genre']}")
-                st.write(f"**Artist:** {rec['artist_name']}")
+                st.write(f"**Search #:** {rec.get('total_searches_for_genre', '?')}")
+                st.write(f"**Official Channel:** {'Yes' if rec.get('has_official_channel') else 'No'}")
                 official_videos = rec.get('official_videos_found', 0)
                 total_songs = len(rec['songs'])
                 
                 if official_videos == total_songs:
-                    st.write("✅ All official videos found")
+                    st.write("✅ All official videos")
                 elif official_videos > 0:
-                    st.write(f"🟡 {official_videos}/{total_songs} official videos")
+                    st.write(f"🟡 {official_videos}/{total_songs} official")
                 else:
-                    st.write("🔴 No official videos found")
-    
-    # App Info
-    with st.sidebar.expander("📊 About This App"):
-        st.markdown("""
-        **How it works:**
-        1. Enter any music genre (English or non-English)
-        2. AI finds an artist in that genre
-        3. First 15 searches prioritize artists with official YouTube channels
-        4. After that, we suggest any artist in the genre
-        5. App searches YouTube for available videos
-        
-        **Video Availability:**
-        - 🟢 Official: From artist's official channel
-        - 🟡 Unofficial: Fan uploads, lyric videos, covers
-        - 🔴 Not Found: No YouTube videos available
-        
-        **Why some artists lack videos:**
-        - Emerging artists without YouTube presence
-        - Regional restrictions or licensing issues
-        - Artists using other platforms (Spotify, SoundCloud)
-        - Niche genres with limited online presence
-        """)
+                    st.write("🔴 No official videos")
 
 if __name__ == "__main__":
     main()
