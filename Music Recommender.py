@@ -25,7 +25,7 @@ def initialize_llm(api_key: str):
     try:
         llm = ChatOpenAI(
             model="deepseek-chat",
-            temperature=0.7,  # Slightly lower for more consistent channel URLs
+            temperature=0.7,
             openai_api_key=api_key,
             openai_api_base="https://api.deepseek.com",
             max_tokens=1000,
@@ -96,10 +96,10 @@ def extract_channel_id_from_url(channel_url: str) -> Optional[str]:
     try:
         # Handle different YouTube URL formats
         patterns = [
-            r'youtube\.com/channel/([^/?&]+)',  # /channel/UC...
-            r'youtube\.com/c/([^/?&]+)',        # /c/ChannelName
-            r'youtube\.com/user/([^/?&]+)',     # /user/Username
-            r'youtube\.com/@([^/?&]+)',         # /@Handle
+            r'youtube\.com/channel/([^/?&]+)',
+            r'youtube\.com/c/([^/?&]+)',
+            r'youtube\.com/user/([^/?&]+)',
+            r'youtube\.com/@([^/?&]+)',
         ]
         
         for pattern in patterns:
@@ -283,7 +283,7 @@ def fallback_youtube_search(song_title: str, artist_name: str) -> Dict:
         return {"found": False, "reason": f"Search error: {str(e)}", "search_method": "fallback"}
 
 # =============================================================================
-# UPDATED ARTIST PROMPT (INCLUDES CHANNEL REQUIREMENT)
+# ARTIST PROMPT TEMPLATES
 # =============================================================================
 
 def create_artist_prompt(genre: str, excluded_artists: List[str], search_count: int) -> PromptTemplate:
@@ -334,11 +334,24 @@ def main():
     if 'search_counts_by_genre' not in st.session_state:
         st.session_state.search_counts_by_genre = {}
     if 'artist_channels' not in st.session_state:
-        st.session_state.artist_channels = {}  # Store found channels
+        st.session_state.artist_channels = {}
     if 'recommendations' not in st.session_state:
         st.session_state.recommendations = []
     if 'api_key' not in st.session_state:
         st.session_state.api_key = ""
+    
+    # BACKWARD COMPATIBILITY FIX: Ensure old recommendations have the new keys
+    for rec in st.session_state.recommendations:
+        if 'channel_locked' not in rec:
+            rec['channel_locked'] = False
+        if 'channel_info' not in rec:
+            rec['channel_info'] = None
+        if 'channel_videos' not in rec:
+            rec['channel_videos'] = 0
+        if 'fallback_videos' not in rec:
+            rec['fallback_videos'] = 0
+        if 'search_count' not in rec:
+            rec['search_count'] = rec.get('total_searches_for_genre', 1)
     
     # UI Header
     st.title("🎵 Music Discovery Pro")
@@ -628,9 +641,14 @@ SONG 3: [Song Title 3]"""
         st.sidebar.markdown("### 📚 Recent")
         
         for rec in reversed(st.session_state.recommendations[-3:]):
-            with st.sidebar.expander(f"{rec['artist_name'][:15]}..."):
-                st.write(f"**Channel:** {'🔒 Found' if rec['channel_locked'] else '🌐 Not found'}")
-                st.write(f"**Videos:** {rec.get('channel_videos', 0)}🔒 + {rec.get('fallback_videos', 0)}🌐")
+            artist_name = rec.get('artist_name', 'Unknown Artist')[:15]
+            channel_locked = rec.get('channel_locked', False)
+            channel_videos = rec.get('channel_videos', 0)
+            fallback_videos = rec.get('fallback_videos', 0)
+            
+            with st.sidebar.expander(f"{artist_name}..."):
+                st.write(f"**Channel:** {'🔒 Found' if channel_locked else '🌐 Not found'}")
+                st.write(f"**Videos:** {channel_videos}🔒 + {fallback_videos}🌐")
 
 if __name__ == "__main__":
     main()
