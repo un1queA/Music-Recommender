@@ -15,7 +15,7 @@ from langchain_core.prompts import PromptTemplate
 from langchain.chains import LLMChain, SequentialChain
 
 # =============================================================================
-# INTELLIGENT ARTIST ROTATION & CONTEXT-AWARE DISCOVERY
+# INITIALIZATION
 # =============================================================================
 
 def initialize_llm(api_key: str):
@@ -34,8 +34,12 @@ def initialize_llm(api_key: str):
         st.error(f"Failed to initialize DeepSeek API: {e}")
         return None
 
+# =============================================================================
+# GENRE POPULARITY CLASSIFICATION
+# =============================================================================
+
 def get_genre_popularity_level(genre: str, llm: ChatOpenAI, search_attempts: int) -> str:
-    """Determine if genre is popular, moderate, or niche based on search history"""
+    """Determine if genre is popular, moderate, or niche"""
     
     prompt = PromptTemplate(
         input_variables=["genre", "attempts"],
@@ -62,7 +66,7 @@ def get_genre_popularity_level(genre: str, llm: ChatOpenAI, search_attempts: int
     try:
         result = chain.run({"genre": genre, "attempts": search_attempts})
         
-        level = "MODERATE"  # Default
+        level = "MODERATE"
         for line in result.strip().split('\n'):
             if line.startswith("LEVEL:"):
                 level = line.replace("LEVEL:", "").strip()
@@ -71,23 +75,25 @@ def get_genre_popularity_level(genre: str, llm: ChatOpenAI, search_attempts: int
     except:
         return "MODERATE"
 
+# =============================================================================
+# INTELLIGENT ARTIST DISCOVERY WITH ROTATION
+# =============================================================================
+
 def get_artist_for_genre(genre: str, llm: ChatOpenAI, excluded_artists: List[str], 
                          genre_popularity: str, search_attempts: int) -> Dict:
-    """Intelligent artist discovery with rotation based on genre popularity"""
+    """Find artist with rotation based on genre popularity"""
     
-    # Calculate how many artists to exclude (scales with attempts)
     max_display_excluded = min(15, len(excluded_artists))
     shown_excluded = excluded_artists[-max_display_excluded:] if excluded_artists else []
     excluded_text = "\n".join([f"- {artist}" for artist in shown_excluded])
     
-    # Adjust prompt based on genre popularity
     if genre_popularity == "POPULAR":
         emphasis = "There are MANY artists in this popular genre. Choose a different mainstream artist each time."
         min_artists_available = "50+"
     elif genre_popularity == "MODERATE":
         emphasis = "There are several notable artists in this genre. Be creative but ensure they have official channels."
         min_artists_available = "10-20"
-    else:  # NICHE
+    else:
         emphasis = "This is a niche genre with limited artists. If no suitable artist with official channel exists, acknowledge this."
         min_artists_available = "1-5"
     
@@ -126,7 +132,6 @@ def get_artist_for_genre(genre: str, llm: ChatOpenAI, excluded_artists: List[str
             "attempts": search_attempts
         })
         
-        # Check for "no artist found" response
         for line in result.strip().split('\n'):
             if line.startswith("NO_ARTIST_FOUND:"):
                 return {
@@ -135,7 +140,6 @@ def get_artist_for_genre(genre: str, llm: ChatOpenAI, excluded_artists: List[str
                     "genre_popularity": genre_popularity
                 }
         
-        # Parse artist information
         artist_info = {
             "status": "FOUND",
             "artist": "",
@@ -168,165 +172,208 @@ def get_artist_for_genre(genre: str, llm: ChatOpenAI, excluded_artists: List[str
             "genre_popularity": genre_popularity
         }
 
+# =============================================================================
+# IMPROVED CHANNEL DETECTION (FIXED VERSION)
+# =============================================================================
+
 def find_and_lock_official_channel(artist_name: str) -> Tuple[Optional[str], str, str]:
-    """Find official channel with detailed status reporting"""
+    """
+    FIXED: Find official channel using flexible matching
+    Returns: (channel_exact_name, status, details)
+    """
     
     search_strategies = [
-        f"{artist_name} official channel",
+        f"{artist_name} official",
         f"{artist_name} topic",
         f"{artist_name} vevo",
-        f"{artist_name} music official"
+        f"{artist_name} music",
+        f'"{artist_name}"',
     ]
     
-    all_results = []
+    all_candidate_channels = []
     
     for search_query in search_strategies:
         try:
             results = YoutubeSearch(search_query, max_results=10).to_dict()
-            all_results.extend(results)
-            time.sleep(0.1)
-        except:
-            continue
-    
-    # Find exact channel with strict rules
-    artist_lower = artist_name.lower().strip()
-    best_channel = None
-    best_score = -100
-    channel_details = ""
-    
-    for result in all_results:
-        channel = result['channel'].strip()
-        channel_lower = channel.lower()
-        title = result['title'].lower()
-        
-        score = 0
-        
-        # MUST-HAVE: Artist name in channel
-        if artist_lower in channel_lower:
-            score += 100
-        else:
-            continue
-        
-        # Positive signals
-        if 'official' in channel_lower:
-            score += 50
-        if 'topic' in channel_lower:
-            score += 40
-        if 'vevo' in channel_lower:
-            score += 35
-        if 'music' in channel_lower:
-            score += 20
             
-        # Negative signals
-        negative_terms = ['cover', 'tribute', 'fan channel', 'reaction', 'compilation', 'lyrics']
-        for term in negative_terms:
-            if term in channel_lower:
-                score -= 100
-                break
+            for result in results:
+                channel_display_name = result['channel'].strip()
+                video_title = result['title'].lower()
                 
-        if score > best_score and score > 0:
-            best_score = score
-            best_channel = channel
+                score = 0
+                artist_lower = artist_name.lower()
+                channel_lower = channel_display_name.lower()
+                
+                # FLEXIBLE MATCHING: Artist name in channel OR channel in artist name
+                if (artist_lower in channel_lower) or (channel_lower in artist_lower and len(channel_lower) > 3):
+                    score += 60
+                
+                # Check video title for artist name
+                if artist_lower in video_title:
+                    score += 30
+                
+                # Official indicators
+                official_indicators = ['official', 'topic', 'vevo']
+                for indicator in official_indicators:
+                    if indicator in channel_lower:
+                        score += 50
+                        break
+                
+                # Check video title for official content
+                for indicator in ['official music video', 'official mv', '【official】']:
+                    if indicator in video_title:
+                        score += 30
+                        break
+                
+                # Negative signals
+                negative_terms = ['cover', 'tribute', 'fanmade', 'lyrics video', 'karaoke']
+                for term in negative_terms:
+                    if term in video_title or term in channel_lower:
+                        score -= 40
+                
+                # Music-related channel
+                music_terms = ['music', '歌曲', 'musica', '歌', 'musik']
+                for term in music_terms:
+                    if term in channel_lower:
+                        score += 15
+                        break
+                
+                # Only consider promising candidates
+                if score >= 50:
+                    if not any(chan[0] == channel_display_name for chan in all_candidate_channels):
+                        all_candidate_channels.append(
+                            (channel_display_name, score, search_query)
+                        )
             
-            # Gather details about why this channel was selected
-            details_parts = []
-            if 'official' in channel_lower:
-                details_parts.append("✓ 'official' in channel name")
-            if 'topic' in channel_lower:
-                details_parts.append("✓ YouTube Music Topic channel")
-            if 'vevo' in channel_lower:
-                details_parts.append("✓ VEVO label channel")
-            
-            channel_details = " | ".join(details_parts) if details_parts else "Artist-name matched channel"
+            time.sleep(0.2)
+        except Exception as e:
+            continue
     
-    if best_channel:
-        return best_channel, "FOUND", channel_details
-    else:
-        return None, "NOT_FOUND", f"No official channel found for {artist_name}"
+    # Fallback strategy
+    if not all_candidate_channels:
+        try:
+            fallback_query = f"channel {artist_name}"
+            results = YoutubeSearch(fallback_query, max_results=5).to_dict()
+            
+            for result in results:
+                title = result['title'].lower()
+                if 'channel' in title or 'subscribe' in title:
+                    channel_name = result['channel'].strip()
+                    all_candidate_channels.append((channel_name, 35, "channel_search"))
+        except:
+            pass
+    
+    # Select best candidate
+    if all_candidate_channels:
+        all_candidate_channels.sort(key=lambda x: x[1], reverse=True)
+        best_channel, best_score, found_via = all_candidate_channels[0]
+        
+        details = f"Score: {best_score}/150 via '{found_via}'."
+        return best_channel, "FOUND", details
+    
+    return None, "NOT_FOUND", f"Exhausted {len(search_strategies)} search strategies for '{artist_name}'."
+
+def calculate_video_match_score(video: Dict, song_query: str, channel_name: str) -> int:
+    """Calculate how well a video matches our search"""
+    score = 0
+    title = video['title'].lower()
+    clean_query = re.sub(r'[^\w\s]', '', song_query.lower())
+    
+    if clean_query in re.sub(r'[^\w\s]', '', title):
+        score += 60
+    
+    query_words = set(clean_query.split())
+    title_words = set(re.sub(r'[^\w\s]', '', title).split())
+    common_words = query_words.intersection(title_words)
+    if common_words:
+        score += len(common_words) * 10
+    
+    official_flags = ['official', 'music video', 'mv', '【official】', '官方版']
+    for flag in official_flags:
+        if flag in title:
+            score += 30
+            break
+    
+    if not any(term in title for term in ['live', 'concert', 'performance', 'acoustic']):
+        score += 20
+    
+    if video.get('duration'):
+        try:
+            parts = video['duration'].split(':')
+            if len(parts) == 2:
+                mins = int(parts[0])
+                if 2 <= mins <= 7:
+                    score += 10
+        except:
+            pass
+    
+    return score
 
 def search_strict_channel_only(song_query: str, locked_channel_name: str) -> Dict:
-    """100% channel-locked search - only returns videos from locked channel"""
-    
+    """Search within locked channel with flexible matching"""
     if not locked_channel_name:
         return {"found": False, "error": "No channel locked"}
-    
-    target_channel_lower = locked_channel_name.lower().strip()
     
     search_variations = [
         f'"{song_query}" "{locked_channel_name}"',
         f"{song_query} {locked_channel_name}",
-        f"{song_query} official {locked_channel_name}"
+        f"{song_query} official {locked_channel_name}",
+        f"{song_query}",
     ]
+    
+    target_channel_lower = locked_channel_name.lower().strip()
+    best_result = None
+    best_score = 0
     
     for search_term in search_variations:
         try:
             results = YoutubeSearch(search_term, max_results=15).to_dict()
             
-            # STRICT FILTER: Only exact channel matches
-            channel_videos = []
             for result in results:
-                if result['channel'].strip().lower() == target_channel_lower:
-                    channel_videos.append(result)
-            
-            if channel_videos:
-                # Find best match by title relevance
-                best_video = None
-                best_score = 0
+                result_channel = result['channel'].strip()
                 
-                for video in channel_videos:
-                    score = 0
-                    title = video['title'].lower()
-                    
-                    clean_query = re.sub(r'[^\w\s]', '', song_query.lower())
-                    clean_title = re.sub(r'[^\w\s]', '', title)
-                    
-                    if clean_query in clean_title:
-                        score += 60
-                    else:
-                        query_words = set(clean_query.split())
-                        title_words = set(clean_title.split())
-                        overlap = len(query_words.intersection(title_words))
-                        if overlap > 0:
-                            score += overlap * 15
-                    
-                    # Official indicators
-                    official_terms = ['official', 'music video', 'mv', '【official】']
-                    for term in official_terms:
-                        if term in title:
-                            score += 30
-                            break
-                    
-                    if not any(term in title for term in ['live', 'concert', 'performance']):
-                        score += 20
-                    
-                    if score > best_score:
-                        best_score = score
-                        best_video = video
+                # FLEXIBLE CHANNEL MATCHING
+                is_same_channel = (
+                    target_channel_lower in result_channel.lower() or 
+                    result_channel.lower() in target_channel_lower
+                )
                 
-                if best_video and best_score >= 40:
-                    return {
-                        "found": True,
-                        "url": f"https://www.youtube.com/watch?v={best_video['id']}",
-                        "title": best_video['title'],
-                        "channel": best_video['channel'],
-                        "score": best_score,
-                        "strict_lock": True
+                if not is_same_channel:
+                    continue
+                
+                score = calculate_video_match_score(result, song_query, locked_channel_name)
+                
+                if score > best_score:
+                    best_score = score
+                    best_result = {
+                        "url": f"https://www.youtube.com/watch?v={result['id']}",
+                        "title": result['title'],
+                        "channel": result_channel,
+                        "score": score,
+                        "search_term": search_term,
+                        "found": True
                     }
-                
-        except:
+        
+        except Exception:
             continue
+    
+    if best_result and best_score >= 40:
+        return best_result
     
     return {
         "found": False,
-        "error": f"No video found in locked channel: {locked_channel_name}",
+        "error": f"No matching video for '{song_query}' in channel '{locked_channel_name}'",
         "strict_lock": True
     }
 
+# =============================================================================
+# SONG MANAGEMENT
+# =============================================================================
+
 def get_songs_for_scenario(artist: str, llm: ChatOpenAI, scenario: str = "NORMAL") -> List[str]:
-    """Get songs based on scenario (normal vs niche/fallback)"""
+    """Get songs based on scenario"""
     
     if scenario == "NICHE_NO_CHANNEL":
-        # For niche genres without channels, get genre-defining songs
         prompt = PromptTemplate(
             input_variables=["artist"],
             template="""For the niche artist/genre "{artist}", list 3 representative song titles 
@@ -338,7 +385,6 @@ def get_songs_for_scenario(artist: str, llm: ChatOpenAI, scenario: str = "NORMAL
             3: [Song Title 3]"""
         )
     else:
-        # Normal: popular songs likely to have official videos
         prompt = PromptTemplate(
             input_variables=["artist"],
             template="""List 3 MOST POPULAR songs by {artist} that definitely have official music videos.
@@ -417,7 +463,7 @@ def handle_niche_genre_case(genre: str, llm: ChatOpenAI, attempts: int) -> Dict:
         }
 
 # =============================================================================
-# STREAMLIT APP WITH INTELLIGENT ARTIST ROTATION
+# STREAMLIT APP
 # =============================================================================
 
 def main():
@@ -427,7 +473,7 @@ def main():
         layout="wide"
     )
     
-    # Initialize session state with genre tracking
+    # Initialize session state
     if 'sessions' not in st.session_state:
         st.session_state.sessions = []
     if 'api_key' not in st.session_state:
@@ -435,9 +481,9 @@ def main():
     if 'excluded_artists' not in st.session_state:
         st.session_state.excluded_artists = []
     if 'genre_attempts' not in st.session_state:
-        st.session_state.genre_attempts = {}  # genre -> attempt count
+        st.session_state.genre_attempts = {}
     if 'genre_popularity' not in st.session_state:
-        st.session_state.genre_popularity = {}  # genre -> popularity level
+        st.session_state.genre_popularity = {}
     
     # Custom CSS
     st.markdown("""
@@ -471,6 +517,13 @@ def main():
         display: inline-block;
         margin-left: 10px;
     }
+    .channel-success {
+        background-color: #E8F5E9;
+        border-left: 5px solid #4CAF50;
+        padding: 15px;
+        margin: 15px 0;
+        border-radius: 0 8px 8px 0;
+    }
     </style>
     """, unsafe_allow_html=True)
     
@@ -480,7 +533,7 @@ def main():
     **Intelligent Features:**
     - 🎯 **Artist Rotation**: Never repeats artists for popular genres
     - 🧠 **Genre Awareness**: Different handling for popular vs niche genres  
-    - 🔍 **Smart Fallback**: Helpful explanations when content isn't available
+    - 🔍 **Smart Channel Detection**: Flexible matching for official channels
     - 🔒 **Channel Locking**: 100% official channel guarantee
     """)
     
@@ -646,24 +699,26 @@ def main():
         st.success(f"🎤 **Artist Found:** {artist_name}")
         st.caption(f"Tier: {artist_result.get('tier', 'Unknown')} | YouTube: {artist_result.get('youtube_presence', '')}")
         
-        # Step 2: Find and lock official channel
+        # Step 2: Find and lock official channel (FIXED VERSION)
         st.markdown("---")
         st.markdown("### 🔍 Finding Official Channel")
         
-        with st.spinner("Searching for official YouTube channel..."):
+        with st.spinner("Searching for official YouTube channel (using flexible matching)..."):
             locked_channel, channel_status, channel_details = find_and_lock_official_channel(artist_name)
         
         if channel_status == "FOUND" and locked_channel:
+            st.markdown(f'<div class="channel-success">', unsafe_allow_html=True)
             st.success(f"✅ **Channel Locked:** {locked_channel}")
             if channel_details:
-                st.caption(f"Selection details: {channel_details}")
+                st.caption(f"Detection details: {channel_details}")
+            st.markdown("</div>", unsafe_allow_html=True)
         else:
             # No official channel found for this artist
             st.warning(f"⚠️ No official channel found for {artist_name}")
             st.markdown(f'<div class="explanation-box">', unsafe_allow_html=True)
             st.write(f"**Artist:** {artist_name}")
             st.write(f"**Genre:** {genre_input}")
-            st.write("**Issue:** This artist doesn't appear to have an official YouTube channel")
+            st.write(f"**Status:** {channel_details}")
             st.write("**Suggestion:** Try a different artist or search manually on YouTube")
             st.markdown("</div>", unsafe_allow_html=True)
             
@@ -741,6 +796,8 @@ def main():
                         st.write(f"**Title:** {video_result['title'][:50]}...")
                         st.write(f"**Channel:** {video_result['channel']}")
                         st.write(f"**Match Score:** {video_result.get('score', 0)}/100")
+                        if video_result.get("search_term"):
+                            st.write(f"**Found via:** `{video_result['search_term'][:30]}...`")
                 
                 else:
                     st.warning("❌ Not found in locked channel")
