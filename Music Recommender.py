@@ -803,7 +803,7 @@ def main():
             st.rerun()
     
     # Main input
-    st.markdown("### 🎯 Enter Any Music Genre")
+    st.markdown("###Enter Any Music Genre")
     
     col1, col2 = st.columns([3, 1])
     with col1:
@@ -838,7 +838,7 @@ def main():
         st.session_state.genre_attempts[genre_input] += 1
         current_attempt = st.session_state.genre_attempts[genre_input]
         
-        st.markdown(f'<span class="universal-badge">🌐 Universal Mode: Works with any language</span>', unsafe_allow_html=True)
+        
         
         # Analyze genre popularity
         if genre_input not in st.session_state.genre_popularity:
@@ -909,7 +909,7 @@ def main():
         st.markdown("---")
         st.markdown("### 🔍 Finding Official Channel")
         
-        with st.spinner("Finding official YouTube channel (avoiding record labels)..."):
+        with st.spinner("Finding official YouTube channel"):
             locked_channel, channel_status, search_queries = find_and_lock_official_channel(
                 artist_name, genre_input, llm
             )
@@ -918,8 +918,7 @@ def main():
             st.success(f"✅ **Artist Channel Locked:** {locked_channel}")
             
             # Step 3: DISCOVER VIDEOS THAT ACTUALLY EXIST IN THE CHANNEL
-            st.markdown("---")
-            st.markdown(f"### 🎵 Discovering Videos in {locked_channel}")
+
             
             with st.spinner(f"Exploring {locked_channel} for {artist_name} music videos..."):
                 available_videos = discover_channel_videos(locked_channel, artist_name)
@@ -952,8 +951,8 @@ def main():
             
             # Show AI-powered selection info
             st.success(f"✅ **AI-Selected {len(selected_videos)} Distinct Songs**")
-            st.markdown('<span class="ai-badge">🤖 AI-Powered Song Selection</span>', unsafe_allow_html=True)
-            st.caption("Using DeepSeek to ensure each video is a different song, not just a different version")
+            
+            
             
             videos_found = 0
             cols = st.columns(3)
@@ -1034,33 +1033,7 @@ def main():
             }
             st.session_state.sessions.append(session_data)
     
-    # Recent sessions
-    if st.session_state.sessions:
-        st.markdown("---")
-        st.markdown("### 📋 Recent Sessions")
-        
-        for session in reversed(st.session_state.sessions[-5:]):
-            if session.get("status") == "NICHE_GENRE":
-                with st.expander(f"🔍 {session['genre']} - Niche Genre", expanded=False):
-                    st.write(f"**Result:** Genre too niche for official channels")
-                    st.write(f"**Songs:** {len(session.get('songs', []))} suggested")
-            elif session.get("status") == "NO_CHANNEL":
-                with st.expander(f"⚠️ {session['genre']} → {session['artist']} - No Channel", expanded=False):
-                    st.write(f"**Result:** No official channel found")
-                    st.write(f"**Attempt:** #{session.get('attempt', 1)}")
-            elif session.get("status") == "NO_VIDEOS_IN_CHANNEL":
-                with st.expander(f"⚠️ {session['genre']} → {session['artist']} - No Videos", expanded=False):
-                    st.write(f"**Channel:** {session.get('locked_channel', 'Unknown')}")
-                    st.write(f"**Result:** Channel found but no videos")
-            else:
-                with st.expander(
-                    f"{session['genre']} → {session['artist']} "
-                    f"({session.get('videos_found', 0)}/{session.get('total_videos', 3)} videos)",
-                    expanded=False
-                ):
-                    st.write(f"**Channel:** {session.get('locked_channel', 'Unknown')}")
-                    st.write(f"**Videos Found:** {session.get('videos_found', 0)}/3")
-                    st.write(f"**Attempt:** #{session.get('attempt', 1)}")
+
 
 if __name__ == "__main__":
     main()
