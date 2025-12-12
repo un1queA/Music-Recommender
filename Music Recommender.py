@@ -767,16 +767,8 @@ def main():
     """, unsafe_allow_html=True)
     
     # Header
-    st.title("🌍 Universal Music Explorer")
-    st.markdown("""
-    **Enhanced Features:**
-    - 🎯 **Channel-First Discovery**: Finds videos that actually exist in the channel
-    - 🌐 **Language-Agnostic**: Works with Tamil, Korean, Arabic, etc. (no hardcoded terms)
-    - 🔒 **Guaranteed 3/3 Videos**: All videos come from the locked official channel
-    - 🧠 **Smart Genre Handling**: Adapts to popular vs niche genres
-    - 🎤 **Artist-Focused**: Avoids record label channels, targets artist-specific content
-    - 🤖 **AI Song Selection**: Uses DeepSeek to ensure each video is a different song (not just different versions)
-    """)
+    st.title("🔊 I AM MUSIC")
+
     
     # Sidebar
     with st.sidebar:
@@ -1025,7 +1017,6 @@ def main():
             st.markdown("---")
             if videos_found == 3:
                 st.success(f"🎉 **Perfect! Found 3 AI-selected songs from {locked_channel}**")
-                st.balloons()
             else:
                 st.warning(f"⚠️ Found {videos_found}/3 videos in the channel")
         
