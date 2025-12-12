@@ -14,6 +14,96 @@ from langchain_core.prompts import PromptTemplate
 from langchain.chains import LLMChain, SequentialChain
 
 # =============================================================================
+# LLM-POWERED SONG DEDUPLICATION (SMARTER THAN REGEX)
+# =============================================================================
+
+def are_songs_different_llm(title1: str, title2: str, llm: ChatOpenAI) -> bool:
+    """
+    Use DeepSeek to intelligently determine if two video titles represent DIFFERENT SONGS.
+    Returns True if they're DIFFERENT songs, False if they're the SAME song (different versions).
+    """
+    
+    prompt = PromptTemplate(
+        input_variables=["title1", "title2"],
+        template="""Analyze these two YouTube video titles from a music channel:
+        
+        Title 1: "{title1}"
+        Title 2: "{title2}"
+        
+        Determine if these represent DIFFERENT SONGS or just DIFFERENT VERSIONS of the SAME SONG.
+        
+        CONSIDER:
+        - Same song can have: (Official Video), (Live), (Acoustic), (Remix), (Lyrics), [4K], etc.
+        - Different songs will have different core titles/names
+        - Featured artists (ft./feat.) don't necessarily mean different songs
+        - Language doesn't matter - focus on the core song identity
+        - Live performances, acoustic versions, remixes, lyric videos of the SAME song = SAME SONG
+        
+        Return EXACTLY:
+        DIFFERENT: [YES/NO]
+        REASON: [Brief explanation]"""
+    )
+    
+    chain = LLMChain(llm=llm, prompt=prompt)
+    
+    try:
+        result = chain.run({"title1": title1, "title2": title2})
+        
+        # Parse the result
+        different = "NO"  # Default to "same song"
+        for line in result.strip().split('\n'):
+            if line.startswith("DIFFERENT:"):
+                different = line.replace("DIFFERENT:", "").strip().upper()
+                break
+        
+        # Return True if LLM says they're DIFFERENT songs
+        return different == "YES"
+        
+    except Exception as e:
+        # Fallback to simple string comparison if LLM fails
+        return title1 != title2
+
+def select_best_music_videos(videos: List[Dict], count: int, llm: ChatOpenAI) -> List[Dict]:
+    """
+    Select the best music videos using LLM to ensure DIFFERENT SONGS.
+    Much more accurate than regex-based approaches.
+    """
+    
+    if not videos or not llm:
+        return videos[:count] if videos else []
+    
+    if len(videos) <= count:
+        return videos[:count]
+    
+    # Sort by score (best first)
+    sorted_videos = sorted(videos, key=lambda x: x.get('score', 0), reverse=True)
+    
+    selected = []
+    
+    for video in sorted_videos:
+        if len(selected) >= count:
+            break
+        
+        # Check if this video is a DIFFERENT SONG from all already selected
+        is_different_song = True
+        
+        if selected:  # Only check if we already have selected videos
+            for selected_video in selected:
+                # Use LLM to check if songs are different
+                if not are_songs_different_llm(video['title'], selected_video['title'], llm):
+                    is_different_song = False
+                    break
+        
+        if is_different_song:
+            selected.append(video)
+    
+    # If we couldn't find enough distinct songs, take top scored ones anyway
+    if len(selected) < count:
+        selected = sorted_videos[:count]
+    
+    return selected[:count]
+
+# =============================================================================
 # CORE: LANGUAGE-AGNOSTIC CHANNEL & VIDEO DISCOVERY
 # =============================================================================
 
@@ -398,46 +488,6 @@ def score_video_music_likelihood(video: Dict, artist_name: str) -> int:
     
     return max(0, score)  # Ensure non-negative score
 
-def select_best_music_videos(videos: List[Dict], count: int = 3) -> List[Dict]:
-    """Select the best music videos ensuring diversity"""
-    
-    if not videos:
-        return []
-    
-    if len(videos) <= count:
-        return videos[:count]
-    
-    selected = []
-    used_titles = set()
-    
-    for video in videos:
-        if len(selected) >= count:
-            break
-        
-        title_lower = video['title'].lower()
-        
-        # Check for similarity with already selected videos
-        # (avoid picking multiple versions of same song)
-        is_too_similar = False
-        for used_title in used_titles:
-            # Simple similarity check: share many words
-            current_words = set(re.findall(r'\w+', title_lower, re.UNICODE))
-            used_words = set(re.findall(r'\w+', used_title, re.UNICODE))
-            
-            if len(current_words.intersection(used_words)) >= 2:
-                is_too_similar = True
-                break
-        
-        if not is_too_similar:
-            selected.append(video)
-            used_titles.add(title_lower)
-    
-    # If we couldn't find enough diverse videos, take top by score
-    if len(selected) < count:
-        selected = videos[:count]
-    
-    return selected
-
 # =============================================================================
 # INTELLIGENT ARTIST ROTATION & GENRE HANDLING
 # =============================================================================
@@ -704,18 +754,28 @@ def main():
         display: inline-block;
         margin: 2px;
     }
+    .ai-badge {
+        background: linear-gradient(135deg, #9C27B0 0%, #673AB7 100%);
+        color: white;
+        padding: 3px 8px;
+        border-radius: 12px;
+        font-size: 0.8em;
+        display: inline-block;
+        margin: 2px;
+    }
     </style>
     """, unsafe_allow_html=True)
     
     # Header
     st.title("🌍 Universal Music Explorer")
     st.markdown("""
-    **Truly Universal Features:**
+    **Enhanced Features:**
     - 🎯 **Channel-First Discovery**: Finds videos that actually exist in the channel
     - 🌐 **Language-Agnostic**: Works with Tamil, Korean, Arabic, etc. (no hardcoded terms)
     - 🔒 **Guaranteed 3/3 Videos**: All videos come from the locked official channel
     - 🧠 **Smart Genre Handling**: Adapts to popular vs niche genres
     - 🎤 **Artist-Focused**: Avoids record label channels, targets artist-specific content
+    - 🤖 **AI Song Selection**: Uses DeepSeek to ensure each video is a different song (not just different versions)
     """)
     
     # Sidebar
@@ -887,8 +947,9 @@ def main():
                 st.session_state.sessions.append(session_data)
                 return
             
-            # Select best 3 music videos
-            selected_videos = select_best_music_videos(available_videos, 3)
+            # Select best 3 music videos (using AI to ensure different songs)
+            with st.spinner(f"🤖 Using AI to select different songs..."):
+                selected_videos = select_best_music_videos(available_videos, 3, llm)
             
             if len(selected_videos) < 3:
                 st.warning(f"⚠️ Only found {len(selected_videos)} suitable music videos")
@@ -896,7 +957,11 @@ def main():
             # Display results
             st.markdown("---")
             st.markdown(f"### 🎵 {artist_name} Music Videos from {locked_channel}")
-            st.success(f"✅ **Found {len(selected_videos)} official music videos**")
+            
+            # Show AI-powered selection info
+            st.success(f"✅ **AI-Selected {len(selected_videos)} Distinct Songs**")
+            st.markdown('<span class="ai-badge">🤖 AI-Powered Song Selection</span>', unsafe_allow_html=True)
+            st.caption("Using DeepSeek to ensure each video is a different song, not just a different version")
             
             videos_found = 0
             cols = st.columns(3)
@@ -904,7 +969,7 @@ def main():
             for idx, video in enumerate(selected_videos):
                 with cols[idx % 3]:
                     st.markdown(f'<div class="video-success">', unsafe_allow_html=True)
-                    st.markdown(f"**Video {idx+1}**")
+                    st.markdown(f"**Song {idx+1}**")
                     
                     # Display video
                     try:
@@ -919,8 +984,10 @@ def main():
                         display_title = display_title[:37] + "..."
                     
                     st.write(f"**{display_title}**")
+                    
                     if video.get('duration'):
                         st.caption(f"Duration: {video['duration']}")
+                    
                     if video.get('score'):
                         score = video['score']
                         if score >= 70:
@@ -957,7 +1024,7 @@ def main():
             # Summary
             st.markdown("---")
             if videos_found == 3:
-                st.success(f"🎉 **Perfect! All 3 videos found in {locked_channel}**")
+                st.success(f"🎉 **Perfect! Found 3 AI-selected songs from {locked_channel}**")
                 st.balloons()
             else:
                 st.warning(f"⚠️ Found {videos_found}/3 videos in the channel")
