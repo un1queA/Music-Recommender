@@ -34,17 +34,22 @@ def initialize_llm(api_key: str):
         return None
 
 def get_artist_search_queries(artist_name: str, genre: str, llm: ChatOpenAI) -> List[str]:
-    """Use LLM to generate optimal YouTube search queries for any artist/language"""
+    """Generate queries that specifically avoid label channels"""
     
     prompt = PromptTemplate(
         input_variables=["artist_name", "genre"],
-        template="""For the artist "{artist_name}" (genre: {genre}), generate 3 specific YouTube search queries
-        that will best find their OFFICIAL YouTube channel.
+        template="""For the artist "{artist_name}" (genre: {genre}), generate 3 YouTube search queries
+        that will best find THEIR PERSONAL/OFFICIAL channel (not record label channels).
         
-        Consider:
-        1. The artist's native language and common channel naming conventions
-        2. Common official channel markers in their region/language
-        3. Variations of their name that might appear in channel titles
+        AVOID queries that might return:
+        - Record label channels
+        - Music company channels  
+        - Compilation channels
+        
+        FAVOR queries that might return:
+        - Artist's personal channel
+        - Artist's topic channel
+        - Artist's name exactly
         
         Return EXACTLY 3 queries separated by | (pipe symbol):
         QUERY_1 | QUERY_2 | QUERY_3"""
@@ -66,8 +71,7 @@ def get_artist_search_queries(artist_name: str, genre: str, llm: ChatOpenAI) -> 
 
 def find_and_lock_official_channel(artist_name: str, genre: str, llm: ChatOpenAI) -> Tuple[Optional[str], str, List[str]]:
     """
-    IMPROVED: Find official channel using LLM-optimized search queries
-    Uses structural patterns instead of language-specific text
+    ENHANCED: Better channel matching that avoids record label/company channels
     """
     
     # Get smart search queries from LLM
@@ -84,76 +88,166 @@ def find_and_lock_official_channel(artist_name: str, genre: str, llm: ChatOpenAI
                 channel_lower = channel_name.lower()
                 title_lower = result['title'].lower()
                 
-                # UNIVERSAL CHANNEL SCORING (no language-specific terms)
+                # ENHANCED SCORING SYSTEM
                 score = 0
+                penalties = 0
                 
-                # 1. Channel structural patterns (universal)
-                # Official channels often have clean names without extra descriptors
-                name_cleanliness = 0
-                clean_name = re.sub(r'[^a-zA-Z0-9\s\u4e00-\u9fff\uac00-\ud7a3\u3040-\u309f\u30a0-\u30ff\u0400-\u04FF]', '', channel_name)
-                if len(channel_name) == len(clean_name):
-                    name_cleanliness += 20
+                # ====== POSITIVE SCORING (Artist-Focused) ======
                 
-                # 2. Video patterns that suggest official content
-                # Official videos often have consistent formatting
-                if re.search(r'[【\[\(].*[】\]\)]', result['title']):
-                    score += 15  # Brackets/parentheses often indicate official markers
-                
-                # 3. Length patterns (official music videos are typically 2-10 minutes)
-                if result.get('duration'):
-                    try:
-                        parts = result['duration'].split(':')
-                        if len(parts) == 2:
-                            mins = int(parts[0])
-                            if 2 <= mins <= 10:
-                                score += 25  # Typical music video length
-                    except:
-                        pass
-                
-                # 4. Artist name matching (flexible, any script)
+                # 1. Artist name matching (flexible, any script) - INCREASED WEIGHT
                 artist_words = set(re.findall(r'[\w\u4e00-\u9fff\uac00-\ud7a3\u3040-\u309f\u30a0-\u30ff\u0400-\u04FF]+', artist_name.lower(), re.UNICODE))
                 channel_words = set(re.findall(r'[\w\u4e00-\u9fff\uac00-\ud7a3\u3040-\u309f\u30a0-\u30ff\u0400-\u04FF]+', channel_lower, re.UNICODE))
                 
                 common_words = artist_words.intersection(channel_words)
                 if common_words:
-                    score += len(common_words) * 20
+                    score += len(common_words) * 30  # Increased from 20
                 
-                # 5. View count as engagement signal (universal)
+                # 2. EXACT MATCH BONUS - Channel name contains artist name exactly
+                artist_name_lower = artist_name.lower()
+                if artist_name_lower in channel_lower:
+                    score += 50  # Significant bonus for exact match
+                elif any(word in channel_lower for word in artist_name_lower.split()):
+                    score += 30  # Partial match bonus
+                
+                # 3. Channel name cleanliness - individual artists usually have simpler names
+                name_cleanliness = 0
+                clean_name = re.sub(r'[^a-zA-Z0-9\s\u4e00-\u9fff\uac00-\ud7a3\u3040-\u309f\u30a0-\u30ff\u0400-\u04FF]', '', channel_name)
+                if len(channel_name) == len(clean_name):
+                    name_cleanliness += 20
+                
+                # 4. Video title contains artist name
+                if any(word in title_lower for word in artist_name_lower.split()):
+                    score += 25
+                
+                # ====== NEGATIVE SCORING (Record Label Detection) ======
+                
+                # 5. RECORD LABEL PENALTIES - CRITICAL ADDITION
+                record_label_indicators = [
+                    'records', 'recordings', 'entertainment', 'music group',
+                    'global', 'official music', 'vevo', 'network', 'corporation',
+                    'studio', 'productions', 'channel', 'hq', 'tv', 'media'
+                ]
+                
+                # Penalize if channel contains record label terms
+                for indicator in record_label_indicators:
+                    if indicator in channel_lower:
+                        penalties += 40  # Heavy penalty
+                        break
+                
+                # 6. Penalize if channel name is MUCH longer than artist name (labels often have longer names)
+                if len(channel_name) > len(artist_name) * 2:
+                    penalties += 20
+                
+                # 7. Penalize if channel name contains common company suffixes
+                company_suffixes = ['inc', 'llc', 'ltd', 'co', 'corp']
+                for suffix in company_suffixes:
+                    if f' {suffix}' in channel_lower or f'({suffix})' in channel_lower:
+                        penalties += 30
+                
+                # ====== VIDEO CONTENT VERIFICATION ======
+                
+                # 8. Check multiple videos from this channel to see if they feature our artist
+                if score - penalties >= 40:  # Only check promising candidates
+                    try:
+                        # Search for more videos from this channel
+                        channel_videos = YoutubeSearch(channel_name, max_results=10).to_dict()
+                        
+                        artist_video_count = 0
+                        total_checked = 0
+                        
+                        for video in channel_videos:
+                            if video['channel'].strip() == channel_name:
+                                total_checked += 1
+                                video_title = video['title'].lower()
+                                
+                                # Check if this video features our artist
+                                if any(word in video_title for word in artist_name_lower.split()):
+                                    artist_video_count += 1
+                                
+                                if total_checked >= 5:
+                                    break
+                        
+                        # Calculate artist concentration in channel
+                        if total_checked > 0:
+                            artist_concentration = artist_video_count / total_checked
+                            
+                            # Reward channels with high artist concentration
+                            if artist_concentration >= 0.6:  # 60%+ videos feature artist
+                                score += 40
+                            elif artist_concentration >= 0.3:  # 30-59% videos feature artist
+                                score += 20
+                            else:  # Less than 30% videos feature artist
+                                penalties += 30  # Penalize channels with little artist content
+                    
+                    except Exception as e:
+                        # If we can't check, give neutral score
+                        pass
+                
+                # 9. View count as engagement signal
                 if result.get('views'):
                     views_text = result['views'].lower()
-                    if 'm' in views_text or 'k' in views_text:
+                    if 'm' in views_text:
                         score += 15
+                    elif 'k' in views_text:
+                        score += 10
+                
+                # 10. Official video patterns
+                if re.search(r'[【\[\(].*[】\]\)]', result['title']):
+                    score += 15
+                
+                # Apply penalties
+                final_score = max(0, score + name_cleanliness - penalties)
                 
                 # Only consider promising candidates
-                if score >= 30:
+                if final_score >= 50:  # Increased threshold
                     all_candidates.append({
                         'channel': channel_name,
-                        'score': score + name_cleanliness,
+                        'score': final_score,
                         'query_used': search_query,
-                        'video_title': result['title']
+                        'video_title': result['title'],
+                        'artist_match_quality': score,
+                        'label_penalties': penalties
                     })
             
             time.sleep(0.2)
         except Exception as e:
             continue
     
-    # Select best candidate
+    # Select best candidate with additional verification
     if all_candidates:
         all_candidates.sort(key=lambda x: x['score'], reverse=True)
-        best = all_candidates[0]
         
-        # Verify this channel has multiple videos
-        try:
-            # Quick check: search for more videos from this channel
-            channel_check = YoutubeSearch(best['channel'], max_results=5).to_dict()
-            channel_videos = [r for r in channel_check if r['channel'].strip() == best['channel']]
+        # Try top 3 candidates for best match
+        for candidate in all_candidates[:3]:
+            channel_name = candidate['channel']
             
-            if len(channel_videos) >= 3:
-                return best['channel'], "FOUND", search_queries
-        except:
-            pass
+            # FINAL VERIFICATION: Deep check of channel content
+            try:
+                channel_check = YoutubeSearch(channel_name, max_results=20).to_dict()
+                channel_videos = [r for r in channel_check if r['channel'].strip() == channel_name]
+                
+                if len(channel_videos) >= 3:
+                    # Count how many videos feature our artist
+                    artist_videos = 0
+                    for video in channel_videos[:10]:  # Check first 10
+                        video_title = video['title'].lower()
+                        artist_name_lower = artist_name.lower()
+                        
+                        if any(word in video_title for word in artist_name_lower.split()):
+                            artist_videos += 1
+                    
+                    # Only accept if at least 30% of videos feature our artist
+                    if artist_videos >= max(2, len(channel_videos[:10]) * 0.3):
+                        return channel_name, "FOUND", search_queries
+                    else:
+                        # This channel doesn't have enough artist content
+                        continue
+                        
+            except:
+                continue
         
-        return best['channel'], "FOUND", search_queries
+        # If no channel passed final verification, return the top candidate anyway
+        return all_candidates[0]['channel'], "FOUND", search_queries
     
     return None, "NOT_FOUND", search_queries
 
@@ -592,6 +686,24 @@ def main():
         margin: 10px 0;
         background-color: #f9f9f9;
     }
+    .artist-match-high {
+        background: linear-gradient(135deg, #4CAF50 0%, #8BC34A 100%);
+        color: white;
+        padding: 3px 8px;
+        border-radius: 12px;
+        font-size: 0.8em;
+        display: inline-block;
+        margin: 2px;
+    }
+    .artist-match-medium {
+        background: linear-gradient(135deg, #FF9800 0%, #FFC107 100%);
+        color: white;
+        padding: 3px 8px;
+        border-radius: 12px;
+        font-size: 0.8em;
+        display: inline-block;
+        margin: 2px;
+    }
     </style>
     """, unsafe_allow_html=True)
     
@@ -603,6 +715,7 @@ def main():
     - 🌐 **Language-Agnostic**: Works with Tamil, Korean, Arabic, etc. (no hardcoded terms)
     - 🔒 **Guaranteed 3/3 Videos**: All videos come from the locked official channel
     - 🧠 **Smart Genre Handling**: Adapts to popular vs niche genres
+    - 🎤 **Artist-Focused**: Avoids record label channels, targets artist-specific content
     """)
     
     # Sidebar
@@ -744,19 +857,19 @@ def main():
         st.markdown("---")
         st.markdown("### 🔍 Finding Official Channel")
         
-        with st.spinner("Finding official YouTube channel..."):
+        with st.spinner("Finding official YouTube channel (avoiding record labels)..."):
             locked_channel, channel_status, search_queries = find_and_lock_official_channel(
                 artist_name, genre_input, llm
             )
         
         if channel_status == "FOUND" and locked_channel:
-            st.success(f"✅ **Channel Locked:** {locked_channel}")
+            st.success(f"✅ **Artist Channel Locked:** {locked_channel}")
             
             # Step 3: DISCOVER VIDEOS THAT ACTUALLY EXIST IN THE CHANNEL
             st.markdown("---")
             st.markdown(f"### 🎵 Discovering Videos in {locked_channel}")
             
-            with st.spinner(f"Exploring {locked_channel} for music videos..."):
+            with st.spinner(f"Exploring {locked_channel} for {artist_name} music videos..."):
                 available_videos = discover_channel_videos(locked_channel, artist_name)
             
             if not available_videos:
@@ -782,7 +895,7 @@ def main():
             
             # Display results
             st.markdown("---")
-            st.markdown(f"### 🎵 Music Videos from {locked_channel}")
+            st.markdown(f"### 🎵 {artist_name} Music Videos from {locked_channel}")
             st.success(f"✅ **Found {len(selected_videos)} official music videos**")
             
             videos_found = 0
@@ -809,7 +922,11 @@ def main():
                     if video.get('duration'):
                         st.caption(f"Duration: {video['duration']}")
                     if video.get('score'):
-                        st.caption(f"Match score: {video['score']}/100")
+                        score = video['score']
+                        if score >= 70:
+                            st.markdown(f'<span class="artist-match-high">Match: {score}/100</span>', unsafe_allow_html=True)
+                        elif score >= 40:
+                            st.markdown(f'<span class="artist-match-medium">Match: {score}/100</span>', unsafe_allow_html=True)
                     
                     # Watch button
                     st.markdown(
