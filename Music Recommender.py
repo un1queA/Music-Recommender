@@ -729,12 +729,7 @@ def main():
         display: inline-block;
         margin: 5px;
     }
-    .video-success {
-        border: 2px solid #4CAF50;
-        border-radius: 8px;
-        padding: 15px;
-        margin: 10px 0;
-        background-color: #f9f9f9;
+            
     }
     .artist-match-high {
         background: linear-gradient(135deg, #4CAF50 0%, #8BC34A 100%);
@@ -803,7 +798,7 @@ def main():
             st.rerun()
     
     # Main input
-    st.markdown("###Enter Any Music Genre")
+    st.markdown("### Enter Any Music Genre")
     
     col1, col2 = st.columns([3, 1])
     with col1:
