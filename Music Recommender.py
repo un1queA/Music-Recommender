@@ -810,10 +810,11 @@ def main():
             key="genre_input"
         )
         
-
+        # Hidden submit button (for Enter key functionality)
+        submitted = st.form_submit_button("Search", use_container_width=True, type="primary")
     
     # Process search only when form is submitted
-    if genre_input:
+    if submitted and genre_input:
         if not st.session_state.api_key:
             st.error("Please enter your DeepSeek API key!")
             return
@@ -1018,4 +1019,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
