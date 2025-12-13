@@ -13,6 +13,7 @@ from langchain_openai import ChatOpenAI
 from langchain_core.prompts import PromptTemplate
 from langchain.chains import LLMChain, SequentialChain
 
+# [ALL PREVIOUS FUNCTIONS REMAIN EXACTLY THE SAME FROM YOUR CODE]
 # =============================================================================
 # LLM-POWERED SONG DEDUPLICATION (SMARTER THAN REGEX)
 # =============================================================================
@@ -797,22 +798,23 @@ def main():
             st.session_state.genre_popularity = {}
             st.rerun()
     
-    # Main input
-    st.markdown("### Enter Any Music Genre")
+    # Main input with Enter key support
+    st.markdown("### Enter Any Music Genre (Press Enter to Search)")
     
-    col1, col2 = st.columns([3, 1])
-    with col1:
+    # Create a form for Enter key submission
+    with st.form(key="search_form"):
         genre_input = st.text_input(
             "Genre name:",
             placeholder="e.g., Tamil Pop, K-pop, Reggaeton, Synthwave...",
             label_visibility="collapsed",
             key="genre_input"
         )
+        
+        # Hidden submit button (for Enter key functionality)
+        submitted = st.form_submit_button("Search", use_container_width=True, type="primary")
     
-    
-    
-    # Process search
-    if genre_input:
+    # Process search only when form is submitted
+    if submitted and genre_input:
         if not st.session_state.api_key:
             st.error("Please enter your DeepSeek API key!")
             return
@@ -826,8 +828,6 @@ def main():
             st.session_state.genre_attempts[genre_input] = 0
         st.session_state.genre_attempts[genre_input] += 1
         current_attempt = st.session_state.genre_attempts[genre_input]
-        
-        
         
         # Analyze genre popularity
         if genre_input not in st.session_state.genre_popularity:
@@ -886,7 +886,6 @@ def main():
         # Check duplicate
         if artist_name in st.session_state.excluded_artists:
             st.warning(f"⚠️ {artist_name} already suggested! Searching for alternative...")
-            # Could add retry logic here
             return
         
         st.session_state.excluded_artists.append(artist_name)
@@ -906,9 +905,7 @@ def main():
         if channel_status == "FOUND" and locked_channel:
             st.success(f"✅ **Artist Channel Locked:** {locked_channel}")
             
-            # Step 3: DISCOVER VIDEOS THAT ACTUALLY EXIST IN THE CHANNEL
-
-            
+            # Step 3: Discover videos that actually exist in the channel
             with st.spinner(f"Exploring {locked_channel} for {artist_name} music videos..."):
                 available_videos = discover_channel_videos(locked_channel, artist_name)
             
@@ -940,8 +937,6 @@ def main():
             
             # Show AI-powered selection info
             st.success(f"✅ **AI-Selected {len(selected_videos)} Distinct Songs**")
-            
-            
             
             videos_found = 0
             cols = st.columns(3)
@@ -1021,9 +1016,6 @@ def main():
                 "timestamp": time.time()
             }
             st.session_state.sessions.append(session_data)
-    
-
 
 if __name__ == "__main__":
     main()
-
