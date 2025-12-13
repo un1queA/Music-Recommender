@@ -802,7 +802,7 @@ def main():
     st.markdown("### Enter Any Music Genre")
 
     # Create a centered layout using columns
-    col1, col2, col3 = st.columns([4,1,1])  # Middle column is 2x wide, sides are narrow
+    col1, col2, col3 = st.columns([3,1,1])  # Middle column is 2x wide, sides are narrow
 
     with col1:  # This places the form only in the middle column
         with st.form(key="search_form"):
@@ -1021,5 +1021,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
