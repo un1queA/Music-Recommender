@@ -701,7 +701,7 @@ def handle_niche_genre_fallback(genre: str, llm: ChatOpenAI, attempts: int) -> D
 
 def main():
     st.set_page_config(
-        page_title="🌍 Universal Music Explorer",
+        page_title="IAMUSIC ",
         page_icon="🎵",
         layout="wide"
     )
@@ -810,11 +810,10 @@ def main():
             key="genre_input"
         )
         
-        # Hidden submit button (for Enter key functionality)
-        submitted = st.form_submit_button("Search", use_container_width=True, type="primary")
+
     
     # Process search only when form is submitted
-    if submitted and genre_input:
+    if genre_input:
         if not st.session_state.api_key:
             st.error("Please enter your DeepSeek API key!")
             return
@@ -1019,3 +1018,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
