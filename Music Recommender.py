@@ -701,8 +701,8 @@ def handle_niche_genre_fallback(genre: str, llm: ChatOpenAI, attempts: int) -> D
 
 def main():
     st.set_page_config(
-        page_title="IAMUSIC ",
-        page_icon="🎵",
+        page_title="IAMUSIC",
+        page_icon="🤘",
         layout="wide"
     )
     
@@ -798,10 +798,6 @@ def main():
             st.session_state.genre_popularity = {}
             st.rerun()
     
-    # Main input with Enter key support
-    st.markdown("### Enter Any Music Genre")
-    
-    # Create a form for Enter key submission
 # Main input with Enter key support
 st.markdown("### Enter Any Music Genre (Press Enter to Search)")
 
@@ -1025,5 +1021,3 @@ with col2:  # This places the form only in the middle column
 
 if __name__ == "__main__":
     main()
-
-
