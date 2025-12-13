@@ -701,8 +701,8 @@ def handle_niche_genre_fallback(genre: str, llm: ChatOpenAI, attempts: int) -> D
 
 def main():
     st.set_page_config(
-        page_title="IAMUSIC",
-        page_icon="🤘",
+        page_title="🌍 Universal Music Explorer",
+        page_icon="🎵",
         layout="wide"
     )
     
@@ -798,21 +798,22 @@ def main():
             st.session_state.genre_popularity = {}
             st.rerun()
     
-# Main input with Enter key support
-st.markdown("### Enter Any Music Genre (Press Enter to Search)")
+    # Main input with Enter key support
+    st.markdown("### Enter Any Music Genre (Press Enter to Search)")
+    
+    # Create a form for Enter key submission
+    col1, col2, col3 = st.columns([1, 2, 1])
 
-# Create a centered layout using columns
-col1, col2, col3 = st.columns([1, 2, 1])  # Middle column is 2x wide, sides are narrow
-
-with col2:  # This places the form only in the middle column
-    with st.form(key="search_form"):
-        genre_input = st.text_input(
+    with col2:  # This places the form only in the middle column
+        with st.form(key="search_form"):
+            genre_input = st.text_input(
             "Genre name:",
             placeholder="e.g., Tamil Pop, K-pop, Reggaeton, Synthwave...",
             label_visibility="collapsed",
             key="genre_input"
         )
         
+        # Hidden submit button (for Enter key functionality)
         submitted = st.form_submit_button("Search", use_container_width=True, type="primary")
     
     # Process search only when form is submitted
