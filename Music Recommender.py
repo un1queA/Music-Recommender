@@ -809,29 +809,19 @@ def main():
             key="genre_input"
         )
     
-  with st.form(key="search_form"):
-        # Use a single text input that captures Enter key
-        genre_input = st.text_input(
-            "Genre name (Press Enter to search):",
-            placeholder="e.g., Tamil Pop, K-pop, Reggaeton, Synthwave...",
-            label_visibility="collapsed",
-            key="genre_input_main"
+    with col2:
+        st.write("")
+        search_btn = st.button(
+            "🌍 Universal Search",
+            type="primary",
+            use_container_width=True
         )
-        
-        # Hidden submit button (for Enter key functionality)
-        submitted = st.form_submit_button("Search", type="primary", use_container_width=True)
     
-    # Check if form was submitted
-    if submitted and genre_input:
-        st.session_state.current_genre = genre_input
-        st.session_state.search_triggered = True
-    
-    # Process search when triggered
-    if st.session_state.search_triggered and st.session_state.current_genre:
-        genre_input = st.session_state.current_genre
-        
-        # Reset the trigger
-        st.session_state.search_triggered = False
+    # Process search
+    if search_btn and genre_input:
+        if not st.session_state.api_key:
+            st.error("Please enter your DeepSeek API key!")
+            return
         
         llm = initialize_llm(st.session_state.api_key)
         if not llm:
@@ -1042,4 +1032,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
