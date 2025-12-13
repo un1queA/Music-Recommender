@@ -802,6 +802,13 @@ def main():
     st.markdown("### Enter Any Music Genre")
     
     # Create a form for Enter key submission
+# Main input with Enter key support
+st.markdown("### Enter Any Music Genre (Press Enter to Search)")
+
+# Create a centered layout using columns
+col1, col2, col3 = st.columns([1, 2, 1])  # Middle column is 2x wide, sides are narrow
+
+with col2:  # This places the form only in the middle column
     with st.form(key="search_form"):
         genre_input = st.text_input(
             "Genre name:",
@@ -810,8 +817,7 @@ def main():
             key="genre_input"
         )
         
-        # Hidden submit button (for Enter key functionality)
-        submitted = st.form_submit_button("Search", type="primary")
+        submitted = st.form_submit_button("Search", use_container_width=True, type="primary")
     
     # Process search only when form is submitted
     if submitted and genre_input:
@@ -1019,4 +1025,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
