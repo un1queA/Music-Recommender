@@ -809,16 +809,10 @@ def main():
             key="genre_input"
         )
     
-    with col2:
-        st.write("")
-        search_btn = st.button(
-            "🌍 Universal Search",
-            type="primary",
-            use_container_width=True
-        )
+    
     
     # Process search
-    if search_btn and genre_input:
+    if genre_input:
         if not st.session_state.api_key:
             st.error("Please enter your DeepSeek API key!")
             return
@@ -1032,3 +1026,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
