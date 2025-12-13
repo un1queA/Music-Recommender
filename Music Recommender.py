@@ -799,12 +799,12 @@ def main():
             st.rerun()
     
     # Main input with Enter key support
-    st.markdown("### Enter Any Music Genre (Press Enter to Search)")
+    st.markdown("### Enter Any Music Genre")
 
     # Create a centered layout using columns
     col1, col2, col3 = st.columns([1, 2, 1])  # Middle column is 2x wide, sides are narrow
 
-    with col2:  # This places the form only in the middle column
+    with col1:  # This places the form only in the middle column
         with st.form(key="search_form"):
             genre_input = st.text_input(
                 "Genre name:",
@@ -1021,3 +1021,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
