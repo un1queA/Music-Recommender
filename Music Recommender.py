@@ -13,6 +13,7 @@ from langchain_openai import ChatOpenAI
 from langchain_core.prompts import PromptTemplate
 from langchain.chains import LLMChain, SequentialChain
 
+# [ALL PREVIOUS FUNCTIONS REMAIN EXACTLY THE SAME FROM YOUR CODE]
 # =============================================================================
 # LLM-POWERED SONG DEDUPLICATION (SMARTER THAN REGEX)
 # =============================================================================
@@ -700,7 +701,7 @@ def handle_niche_genre_fallback(genre: str, llm: ChatOpenAI, attempts: int) -> D
 
 def main():
     st.set_page_config(
-        page_title="🌍 Universal Music Explorer",
+        page_title="IAMUSIC ",
         page_icon="🎵",
         layout="wide"
     )
@@ -717,7 +718,7 @@ def main():
     if 'genre_popularity' not in st.session_state:
         st.session_state.genre_popularity = {}
     
-    # Custom CSS for better styling
+    # Custom CSS
     st.markdown("""
     <style>
     .universal-badge {
@@ -729,12 +730,7 @@ def main():
         display: inline-block;
         margin: 5px;
     }
-    .video-success {
-        border: 2px solid #4CAF50;
-        border-radius: 8px;
-        padding: 15px;
-        margin: 10px 0;
-        background-color: #f9f9f9;
+            
     }
     .artist-match-high {
         background: linear-gradient(135deg, #4CAF50 0%, #8BC34A 100%);
@@ -763,19 +759,12 @@ def main():
         display: inline-block;
         margin: 2px;
     }
-    .centered-form {
-        max-width: 600px;
-        margin: 0 auto;
-    }
     </style>
     """, unsafe_allow_html=True)
     
     # Header
-    st.title("🎵 Universal Music Explorer")
-    st.markdown("""
-    Discover official artist channels and music videos from any music genre worldwide.
-    *Language-agnostic • AI-powered • Channel-verified*
-    """)
+    st.title("🔊 I AM MUSIC")
+
     
     # Sidebar
     with st.sidebar:
@@ -784,8 +773,7 @@ def main():
             "DeepSeek API Key:",
             type="password",
             value=st.session_state.api_key,
-            placeholder="sk-...",
-            help="Get your API key from https://platform.deepseek.com/api_keys"
+            placeholder="sk-..."
         )
         
         if api_key:
@@ -799,44 +787,38 @@ def main():
         st.write(f"Excluded artists: {len(st.session_state.excluded_artists)}")
         
         if st.session_state.genre_attempts:
-            st.markdown("#### Recent Genre Searches")
+            st.markdown("#### Genre Attempts")
             for genre, attempts in list(st.session_state.genre_attempts.items())[-5:]:
-                st.write(f"**{genre[:20]}...**: {attempts} search{'es' if attempts > 1 else ''}")
+                st.write(f"**{genre[:15]}...**: {attempts} searches")
         
-        if st.button("🔄 Clear All Data", type="secondary", use_container_width=True):
+        if st.button("🔄 Clear All Data", type="secondary"):
             st.session_state.sessions = []
             st.session_state.excluded_artists = []
             st.session_state.genre_attempts = {}
             st.session_state.genre_popularity = {}
             st.rerun()
     
-    # Main input with centered layout
-    st.markdown("### Enter Any Music Genre")
-    st.caption("Press Enter to search • Examples: Tamil Pop, K-pop, Reggaeton, Synthwave...")
-    
-    # Centered form using columns
-    col1, col2, col3 = st.columns([1, 2, 1])
-    
-    with col2:  # This centers the form in the middle column
-        with st.form(key="search_form", clear_on_submit=False):
+    # Main input with Enter key support
+    st.markdown("### Enter Any Music Genre (Press Enter to Search)")
+
+    # Create a centered layout using columns
+    col1, col2, col3 = st.columns([1, 2, 1])  # Middle column is 2x wide, sides are narrow
+
+    with col2:  # This places the form only in the middle column
+        with st.form(key="search_form"):
             genre_input = st.text_input(
                 "Genre name:",
-                placeholder="e.g., Synthwave, Math Rock, Afrobeat...",
+                placeholder="e.g., Tamil Pop, K-pop, Reggaeton, Synthwave...",
                 label_visibility="collapsed",
                 key="genre_input"
             )
             
-            # Full-width submit button
-            submitted = st.form_submit_button(
-                "🔍 Search for Music", 
-                use_container_width=True, 
-                type="primary"
-            )
+            submitted = st.form_submit_button("Search", use_container_width=True, type="primary")
     
-    # Process search
+    # Process search only when form is submitted
     if submitted and genre_input:
         if not st.session_state.api_key:
-            st.error("❌ Please enter your DeepSeek API key in the sidebar!")
+            st.error("Please enter your DeepSeek API key!")
             return
         
         llm = initialize_llm(st.session_state.api_key)
@@ -851,7 +833,7 @@ def main():
         
         # Analyze genre popularity
         if genre_input not in st.session_state.genre_popularity:
-            with st.spinner("🤖 Analyzing genre..."):
+            with st.spinner("Analyzing genre..."):
                 genre_analysis = analyze_genre_popularity(genre_input, llm, current_attempt)
                 st.session_state.genre_popularity[genre_input] = genre_analysis
         else:
@@ -859,7 +841,7 @@ def main():
             genre_analysis["attempts"] = current_attempt
         
         # Step 1: Find artist with rotation
-        with st.spinner(f"🎤 Finding {genre_input} artist..."):
+        with st.spinner(f"Finding {genre_input} artist..."):
             artist_result = discover_artist_with_rotation(
                 genre_input,
                 llm,
@@ -897,7 +879,7 @@ def main():
             return
         
         elif artist_result["status"] != "ARTIST_FOUND":
-            st.error(f"❌ Error: {artist_result.get('explanation', 'Unknown error')}")
+            st.error(f"Error: {artist_result.get('explanation', 'Unknown error')}")
             return
         
         # Artist found
@@ -910,14 +892,14 @@ def main():
         
         st.session_state.excluded_artists.append(artist_name)
         
-        st.success(f"✅ **Artist Found:** {artist_name}")
-        st.caption(f"Confidence: {artist_result.get('confidence', 'Medium')} • {artist_result.get('note', '')}")
+        st.success(f"🎤 **Artist Found:** {artist_name}")
+        st.caption(f"Confidence: {artist_result.get('confidence', 'Medium')} | Note: {artist_result.get('note', '')}")
         
-        # Step 2: Find and lock official channel
+        # Step 2: Find and lock official channel (using LLM-optimized queries)
         st.markdown("---")
         st.markdown("### 🔍 Finding Official Channel")
         
-        with st.spinner("Searching YouTube for official channel..."):
+        with st.spinner("Finding official YouTube channel"):
             locked_channel, channel_status, search_queries = find_and_lock_official_channel(
                 artist_name, genre_input, llm
             )
@@ -925,16 +907,13 @@ def main():
         if channel_status == "FOUND" and locked_channel:
             st.success(f"✅ **Artist Channel Locked:** {locked_channel}")
             
-            # Step 3: Discover videos in the channel
-            st.markdown("---")
-            st.markdown(f"### 🎵 Discovering Videos in {locked_channel}")
-            
-            with st.spinner(f"Exploring {locked_channel} for music videos..."):
+            # Step 3: Discover videos that actually exist in the channel
+            with st.spinner(f"Exploring {locked_channel} for {artist_name} music videos..."):
                 available_videos = discover_channel_videos(locked_channel, artist_name)
             
             if not available_videos:
                 st.error(f"❌ No music videos found in {locked_channel}")
-                st.info(f"Try searching '{artist_name}' directly on YouTube.")
+                st.info(f"Channel might not have public music videos. Try searching '{artist_name}' manually.")
                 
                 session_data = {
                     "genre": genre_input,
@@ -947,8 +926,8 @@ def main():
                 st.session_state.sessions.append(session_data)
                 return
             
-            # Select best 3 music videos
-            with st.spinner("🤖 Selecting distinct songs with AI..."):
+            # Select best 3 music videos (using AI to ensure different songs)
+            with st.spinner(f"🤖 Using AI to select different songs..."):
                 selected_videos = select_best_music_videos(available_videos, 3, llm)
             
             if len(selected_videos) < 3:
@@ -956,15 +935,17 @@ def main():
             
             # Display results
             st.markdown("---")
-            st.markdown(f"### 🎵 {artist_name} - Recommended Videos")
-            st.success(f"✅ Found {len(selected_videos)} AI-selected songs from the official channel")
+            st.markdown(f"### 🎵 {artist_name} Music Videos from {locked_channel}")
+            
+            # Show AI-powered selection info
+            st.success(f"✅ **AI-Selected {len(selected_videos)} Distinct Songs**")
             
             videos_found = 0
             cols = st.columns(3)
             
             for idx, video in enumerate(selected_videos):
                 with cols[idx % 3]:
-                    st.markdown('<div class="video-success">', unsafe_allow_html=True)
+                    st.markdown(f'<div class="video-success">', unsafe_allow_html=True)
                     st.markdown(f"**Song {idx+1}**")
                     
                     # Display video
@@ -982,22 +963,21 @@ def main():
                     st.write(f"**{display_title}**")
                     
                     if video.get('duration'):
-                        st.caption(f"⏱️ {video['duration']}")
+                        st.caption(f"Duration: {video['duration']}")
                     
                     if video.get('score'):
                         score = video['score']
                         if score >= 70:
-                            st.markdown(f'<span class="artist-match-high">Relevance: {score}/100</span>', unsafe_allow_html=True)
+                            st.markdown(f'<span class="artist-match-high">Match: {score}/100</span>', unsafe_allow_html=True)
                         elif score >= 40:
-                            st.markdown(f'<span class="artist-match-medium">Relevance: {score}/100</span>', unsafe_allow_html=True)
+                            st.markdown(f'<span class="artist-match-medium">Match: {score}/100</span>', unsafe_allow_html=True)
                     
                     # Watch button
                     st.markdown(
                         f'<a href="{video["url"]}" target="_blank">'
                         '<button style="background-color: #FF0000; color: white; '
                         'border: none; padding: 8px 16px; border-radius: 4px; '
-                        'cursor: pointer; width: 100%; margin-top: 10px;">'
-                        '▶ Watch on YouTube</button></a>',
+                        'cursor: pointer; width: 100%;">▶ Watch on YouTube</button></a>',
                         unsafe_allow_html=True
                     )
                     
@@ -1021,8 +1001,7 @@ def main():
             # Summary
             st.markdown("---")
             if videos_found == 3:
-                st.success(f"🎉 **Perfect! Found 3 distinct songs from {artist_name}'s official channel**")
-                st.balloons()
+                st.success(f"🎉 **Perfect! Found 3 AI-selected songs from {locked_channel}**")
             else:
                 st.warning(f"⚠️ Found {videos_found}/3 videos in the channel")
         
