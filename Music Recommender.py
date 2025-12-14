@@ -201,7 +201,6 @@ def select_best_music_videos(videos: List[Dict], count: int, llm: ChatOpenAI) ->
 # =============================================================================
 # IMPROVED: BETTER OFFICIAL CHANNEL DETECTION
 # =============================================================================
-
 def initialize_llm(api_key: str):
     """Initialize the LLM with DeepSeek API"""
     try:
@@ -219,24 +218,20 @@ def initialize_llm(api_key: str):
         return None
 
 def get_artist_search_queries(artist_name: str, genre: str, llm: ChatOpenAI) -> List[str]:
-    """Generate queries optimized for finding official channels"""
+    """Generate queries optimized for finding official channels with verification"""
     
     prompt = PromptTemplate(
         input_variables=["artist_name", "genre"],
-        template="""For the artist "{artist_name}" (genre: {genre}), generate 3 YouTube search queries
-        that will best find their OFFICIAL CHANNEL.
-        
-        FOCUS ON:
-        - Official artist channels (not fan channels)
-        - Topic channels (YouTube's official music channels)
-        - Channels with verified checkmarks
-        - Channels with the artist's exact name
-        
-        AVOID:
-        - Fan channels, compilation channels
-        - Lyrics channels
-        - "Official Music" channels (often not the actual artist)
-        
+        template="""Generate 3 specific YouTube search queries to find the OFFICIAL YouTube channel for the artist "{artist_name}" (genre: {genre}).
+
+        PRIORITIZE queries that will return:
+        1. The artist's personal "Official Artist Channel" (with a music note 🎵 badge).
+        2. The official "Topic" channel (e.g., "ArtistName - Topic"), which aggregates official music.
+        3. Channels with verified checkmarks (✓).
+        4. Queries like "[Artist] official YouTube channel" or the channel's exact local language name.
+
+        AVOID queries that return fan channels, lyrics channels, or compilation channels.
+
         Return EXACTLY 3 queries separated by | (pipe symbol):
         QUERY_1 | QUERY_2 | QUERY_3"""
     )
@@ -248,57 +243,136 @@ def get_artist_search_queries(artist_name: str, genre: str, llm: ChatOpenAI) -> 
         queries = [q.strip() for q in result.split('|') if q.strip()]
         return queries[:3]
     except:
-        # Improved fallback queries
+        # Fallback to smart queries
         return [
-            f"{artist_name} official",
+            f"{artist_name} official artist channel",
             f"{artist_name} topic",
-            f"@{artist_name.replace(' ', '')}"
+            f"{artist_name} official YouTube"
         ]
 
-def parse_subscriber_count(subscriber_text: str) -> int:
-    """Parse subscriber count from text (e.g., '1.2M subscribers' -> 1200000)"""
-    if not subscriber_text:
-        return 0
-    
-    subscriber_text = subscriber_text.lower().replace('subscribers', '').replace('subscriber', '').strip()
-    
-    try:
-        if 'm' in subscriber_text:
-            return int(float(subscriber_text.replace('m', '').strip()) * 1_000_000)
-        elif 'k' in subscriber_text:
-            return int(float(subscriber_text.replace('k', '').strip()) * 1_000)
-        else:
-            # Try to parse as plain number
-            return int(''.join(filter(str.isdigit, subscriber_text)))
-    except:
-        return 0
-
-def score_channel_for_artist(channel_name: str, artist_name: str, video_title: str, 
-                            subscriber_text: str = "") -> Dict[str, int]:
+def check_channel_verification_status(channel_name: str, artist_name: str) -> Dict[str, any]:
     """
-    IMPROVED: Score a channel based on how likely it is to be the official artist channel.
-    Returns scores for different categories.
+    Attempts to fetch the channel page to check for verification and Official Artist Channel status.
+    Returns a dict with verification indicators.
+    """
+    import requests
+    from bs4 import BeautifulSoup
+    
+    result = {
+        'is_verified': False,
+        'is_official_artist': False,
+        'official_description_match': 0,
+        'error': None
+    }
+    
+    # Try to find the channel URL from the channel name
+    # This is simplified - in practice you'd need to handle different URL formats
+    try:
+        # First try to search for the channel to get its URL
+        search_results = YoutubeSearch(channel_name, max_results=3).to_dict()
+        if not search_results:
+            result['error'] = "No search results found"
+            return result
+        
+        # Find the exact channel match
+        channel_url = None
+        for res in search_results:
+            if res['channel'].strip().lower() == channel_name.lower():
+                # Construct channel URL from channel ID
+                channel_id = res.get('channel_id') or res['id']
+                if channel_id:
+                    channel_url = f"https://www.youtube.com/channel/{channel_id}"
+                    break
+        
+        if not channel_url:
+            # Fallback to the first result's channel
+            first_result = search_results[0]
+            channel_id = first_result.get('channel_id') or first_result['id']
+            channel_url = f"https://www.youtube.com/channel/{channel_id}"
+        
+        # Fetch the channel page
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        response = requests.get(channel_url, headers=headers, timeout=10)
+        
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.content, 'html.parser')
+            
+            # Check for verification badge (multiple possible patterns)
+            # Note: YouTube's HTML structure changes frequently
+            verification_indicators = [
+                'verified', 'badge-style-type-verified', 'has-badge',
+                'qualified-channel-title-badge'
+            ]
+            
+            page_text = str(soup).lower()
+            for indicator in verification_indicators:
+                if indicator in page_text:
+                    result['is_verified'] = True
+                    break
+            
+            # Check for Official Artist Channel (music note 🎵)
+            # Look for music note emoji or related text
+            music_note_indicators = ['🎵', 'official artist', 'music artist', 'artist channel']
+            for indicator in music_note_indicators:
+                if indicator.lower() in page_text:
+                    result['is_official_artist'] = True
+                    break
+            
+            # Check description for official language
+            description = soup.find('meta', attrs={'name': 'description'})
+            if description and description.get('content'):
+                desc_text = description['content'].lower()
+                artist_lower = artist_name.lower()
+                
+                # Score description for officialness
+                official_phrases = [
+                    f'official channel of {artist_lower}',
+                    f'official youtube channel of {artist_lower}',
+                    f'welcome to the official {artist_lower}',
+                    f'this is the official {artist_lower}',
+                    f'{artist_lower} official channel'
+                ]
+                
+                for phrase in official_phrases:
+                    if phrase in desc_text:
+                        result['official_description_match'] += 30
+                
+                # Additional points for having artist name in description
+                if artist_lower in desc_text:
+                    result['official_description_match'] += 20
+                    
+        else:
+            result['error'] = f"HTTP {response.status_code}"
+            
+    except Exception as e:
+        result['error'] = str(e)
+    
+    return result
+
+def score_channel_for_artist(channel_name: str, artist_name: str, verification_status: Dict) -> Dict[str, int]:
+    """
+    Score a channel based on how likely it is to be the official artist channel.
+    Now includes verification and official artist channel status.
     """
     scores = {
         'name_match': 0,
         'official_indicators': 0,
-        'subscriber_score': 0,
-        'content_quality': 0,
+        'description_score': 0,
         'penalties': 0
     }
     
     artist_name_lower = artist_name.lower()
     channel_lower = channel_name.lower()
-    title_lower = video_title.lower()
     
-    # 1. NAME MATCH SCORING (Most important)
-    
-    # Exact name match (BANGTANTV for BTS) - HIGHEST SCORE
+    # 1. NAME MATCH SCORING
+    # Exact name match is very important
     clean_channel = re.sub(r'[\s\-_]+', '', channel_lower)
     clean_artist = re.sub(r'[\s\-_]+', '', artist_name_lower)
     
     if clean_artist in clean_channel or clean_channel in clean_artist:
-        scores['name_match'] += 80
+        scores['name_match'] += 100  # Very high bonus for exact match
     
     # Contains artist name words
     artist_words = set(re.findall(r'[\w]+', artist_name_lower))
@@ -306,104 +380,68 @@ def score_channel_for_artist(channel_name: str, artist_name: str, video_title: s
     
     common_words = artist_words.intersection(channel_words)
     if common_words:
-        scores['name_match'] += len(common_words) * 15
+        scores['name_match'] += len(common_words) * 20
     
-    # 2. OFFICIAL INDICATORS
+    # 2. OFFICIAL INDICATORS (from verification check)
+    if verification_status.get('is_verified'):
+        scores['official_indicators'] += 150  # Massive bonus for verification
     
-    # Topic channel (YouTube's official music channel)
+    if verification_status.get('is_official_artist'):
+        scores['official_indicators'] += 200  # Even bigger bonus for Official Artist Channel
+    
+    # Topic channel indicator
     if 'topic' in channel_lower:
-        scores['official_indicators'] += 60
+        scores['official_indicators'] += 80  # Topic channels are official for music
     
     # Official keywords in channel name
-    official_keywords = ['official', 'vevo', 'music', 'entertainment']
+    official_keywords = ['official', 'vevo', 'music', 'artist']
     for keyword in official_keywords:
         if keyword in channel_lower:
-            scores['official_indicators'] += 20
+            scores['official_indicators'] += 30
     
-    # Handle format (@channelname)
-    if channel_name.startswith('@'):
-        scores['official_indicators'] += 15
+    # 3. DESCRIPTION SCORE (from verification check)
+    scores['description_score'] = verification_status.get('official_description_match', 0)
     
-    # 3. SUBSCRIBER SCORE (Official channels have more subscribers)
-    if subscriber_text:
-        subscribers = parse_subscriber_count(subscriber_text)
-        if subscribers > 10_000_000:
-            scores['subscriber_score'] += 50
-        elif subscribers > 1_000_000:
-            scores['subscriber_score'] += 40
-        elif subscribers > 100_000:
-            scores['subscriber_score'] += 30
-        elif subscribers > 10_000:
-            scores['subscriber_score'] += 20
-    
-    # 4. CONTENT QUALITY BASED ON VIDEO TITLE
-    
-    # Official video patterns
-    official_patterns = [
-        r'\[official\s+[a-z]+\]',
-        r'\(official\s+[a-z]+\)',
-        r'official\s+music\s+video',
-        r'official\s+audio',
-        r'official\s+mv'
-    ]
-    
-    for pattern in official_patterns:
-        if re.search(pattern, title_lower):
-            scores['content_quality'] += 20
-    
-    # Contains artist name in video title
-    if any(word in title_lower for word in artist_words):
-        scores['content_quality'] += 25
-    
-    # 5. PENALTIES (Avoid wrong channels)
-    
+    # 4. PENALTIES
     # Penalize common wrong channel patterns
     wrong_patterns = [
-        'on beat', 'lyrics', 'lyric', 'compilation',
-        'mixes', 'mix', 'fan', 'cover', 'covers',
-        'best of', 'top 10', 'playlist', 'radio'
+        'on beat', 'lyrics', 'lyric', 'compilation', 'mixes',
+        'fan', 'cover', 'covers', 'best of', 'top 10', 'playlist',
+        'radio', 'daily', 'mix'
     ]
     
     for pattern in wrong_patterns:
         if pattern in channel_lower:
-            scores['penalties'] += 40
-        if pattern in title_lower:
-            scores['penalties'] += 20
+            scores['penalties'] += 60  # Heavy penalty for wrong channels
     
     # Penalize if channel name is MUCH longer than artist name
     if len(channel_name) > len(artist_name) * 3:
-        scores['penalties'] += 30
+        scores['penalties'] += 40
     
     # Penalize record label names without artist name
-    if any(label in channel_lower for label in ['records', 'recordings', 'label', 'network']) and not any(word in channel_lower for word in artist_words):
-        scores['penalties'] += 40
+    label_terms = ['records', 'recordings', 'label', 'network', 'entertainment']
+    if any(term in channel_lower for term in label_terms) and not any(word in channel_lower for word in artist_words):
+        scores['penalties'] += 50
     
     return scores
 
 def find_and_lock_official_channel(artist_name: str, genre: str, llm: ChatOpenAI) -> Tuple[Optional[str], str, List[str]]:
     """
-    IMPROVED: Better channel detection that finds official artist channels.
-    Now with better scoring and verification.
+    COMPLETELY REWORKED: Finds official artist channel using smarter search,
+    verification checks, and multiple verification methods.
     """
     
-    # Get smart search queries
+    # Get smart search queries from LLM
     search_queries = get_artist_search_queries(artist_name, genre, llm)
     
-    # Add channel-specific searches
-    channel_specific_queries = [
-        f"@{artist_name.replace(' ', '')}",
-        f"{artist_name} topic channel",
-        f"{artist_name} official channel"
-    ]
-    
-    all_queries = search_queries + channel_specific_queries
     all_candidates = []
-    
     artist_name_lower = artist_name.lower()
     
-    for search_query in all_queries:
+    st.info(f"🔍 Searching with queries: {', '.join(search_queries)}")
+    
+    for search_query in search_queries:
         try:
-            results = YoutubeSearch(search_query, max_results=20).to_dict()
+            results = YoutubeSearch(search_query, max_results=15).to_dict()
             
             for result in results:
                 channel_name = result['channel'].strip()
@@ -412,87 +450,63 @@ def find_and_lock_official_channel(artist_name: str, genre: str, llm: ChatOpenAI
                 if any(c['channel'] == channel_name for c in all_candidates):
                     continue
                 
+                # Check verification and official status
+                with st.spinner(f"Checking verification for {channel_name}..."):
+                    verification_status = check_channel_verification_status(channel_name, artist_name)
+                
                 # Score this channel
-                scores = score_channel_for_artist(
-                    channel_name, 
-                    artist_name, 
-                    result['title'],
-                    result.get('channel_subscribers', '')
-                )
+                scores = score_channel_for_artist(channel_name, artist_name, verification_status)
                 
                 # Calculate total score
                 total_score = (
                     scores['name_match'] +
                     scores['official_indicators'] +
-                    scores['subscriber_score'] +
-                    scores['content_quality'] -
+                    scores['description_score'] -
                     scores['penalties']
                 )
                 
-                # Only consider promising candidates
-                if total_score >= 70:
-                    # Verify channel content
+                # Add verification bonus separately for display
+                verification_bonus = 0
+                if verification_status.get('is_verified'):
+                    verification_bonus += 150
+                if verification_status.get('is_official_artist'):
+                    verification_bonus += 200
+                
+                # Only consider promising candidates (threshold lowered since verification adds lots of points)
+                if total_score >= 50 or verification_status.get('is_verified') or verification_status.get('is_official_artist'):
+                    
+                    # Additional content verification for promising candidates
+                    content_score = 0
                     try:
-                        # Get more videos from this channel to verify
-                        channel_videos = YoutubeSearch(channel_name, max_results=15).to_dict()
+                        # Get videos from this channel to verify artist content
+                        channel_videos = YoutubeSearch(channel_name, max_results=10).to_dict()
                         channel_videos = [r for r in channel_videos if r['channel'].strip() == channel_name]
                         
                         if channel_videos:
-                            # Check artist concentration in channel
+                            # Check artist concentration
                             artist_video_count = 0
-                            for video in channel_videos[:10]:
+                            for video in channel_videos:
                                 video_title = video['title'].lower()
-                                artist_words = set(re.findall(r'[\w]+', artist_name_lower))
-                                
-                                if any(word in video_title for word in artist_words):
+                                if any(word in video_title for word in artist_name_lower.split()):
                                     artist_video_count += 1
                             
-                            concentration_score = min(50, artist_video_count * 10)
-                            total_score += concentration_score
-                            
-                            # Additional verification: Check for music videos
-                            music_video_count = 0
-                            for video in channel_videos[:10]:
-                                title = video['title'].lower()
-                                duration = video.get('duration', '')
-                                
-                                # Check for music video patterns
-                                music_indicators = [
-                                    'official', 'mv', 'music video', 'audio',
-                                    'lyric', 'performance', 'live'
-                                ]
-                                
-                                if any(indicator in title for indicator in music_indicators):
-                                    music_video_count += 1
-                                
-                                # Check duration (music videos are typically 2-10 minutes)
-                                if duration:
-                                    try:
-                                        if ':' in duration:
-                                            parts = duration.split(':')
-                                            if len(parts) == 2:
-                                                minutes = int(parts[0])
-                                                if 2 <= minutes <= 10:
-                                                    music_video_count += 1
-                                    except:
-                                        pass
-                            
-                            music_score = min(30, music_video_count * 3)
-                            total_score += music_score
+                            content_score = min(100, artist_video_count * 20)
+                            total_score += content_score
                     except:
-                        # If verification fails, use original score
                         pass
                     
                     all_candidates.append({
                         'channel': channel_name,
                         'score': total_score,
                         'scores_breakdown': scores,
+                        'verification_status': verification_status,
+                        'content_score': content_score,
                         'query_used': search_query,
                         'video_title': result['title'],
                         'subscribers': result.get('channel_subscribers', 'N/A')
                     })
             
-            time.sleep(0.1)  # Be nice to YouTube
+            time.sleep(0.2)  # Be nice to YouTube
         except Exception as e:
             continue
     
@@ -501,53 +515,54 @@ def find_and_lock_official_channel(artist_name: str, genre: str, llm: ChatOpenAI
         # Sort by score
         all_candidates.sort(key=lambda x: x['score'], reverse=True)
         
-        # DEBUG: Show top 3 candidates in console (optional)
-        # print(f"Top candidates for {artist_name}:")
-        # for i, cand in enumerate(all_candidates[:3]):
-        #     print(f"{i+1}. {cand['channel']} - Score: {cand['score']}")
+        # Display top candidates for debugging (optional)
+        # st.write("Top channel candidates:", all_candidates[:3])
         
-        # Try the top candidate first
-        best_candidate = all_candidates[0]
-        best_channel = best_candidate['channel']
-        
-        # Final deep verification
-        try:
-            channel_videos = YoutubeSearch(best_channel, max_results=20).to_dict()
-            channel_videos = [r for r in channel_videos if r['channel'].strip() == best_channel]
+        # Try the top 3 candidates with enhanced verification
+        for candidate in all_candidates[:3]:
+            channel_name = candidate['channel']
             
-            if channel_videos:
-                # Check artist presence
-                artist_videos = 0
-                for video in channel_videos[:15]:
-                    video_title = video['title'].lower()
-                    artist_words = set(re.findall(r'[\w]+', artist_name_lower))
+            # Final verification: Deep content check
+            try:
+                channel_videos = YoutubeSearch(channel_name, max_results=20).to_dict()
+                channel_videos = [r for r in channel_videos if r['channel'].strip() == channel_name]
+                
+                if channel_videos:
+                    # Check for consistent artist content
+                    artist_videos = 0
+                    music_videos = 0
                     
-                    if any(word in video_title for word in artist_words):
-                        artist_videos += 1
-                
-                # Require at least 30% artist content
-                if artist_videos >= max(3, len(channel_videos[:15]) * 0.3):
-                    return best_channel, "FOUND", search_queries
-                
-                # If top candidate fails, try next best
-                if len(all_candidates) > 1:
-                    for candidate in all_candidates[1:3]:  # Try next 2
-                        alt_channel = candidate['channel']
-                        alt_videos = YoutubeSearch(alt_channel, max_results=15).to_dict()
-                        alt_videos = [r for r in alt_videos if r['channel'].strip() == alt_channel]
+                    for video in channel_videos[:15]:
+                        video_title = video['title'].lower()
                         
-                        if alt_videos:
-                            artist_videos = 0
-                            for video in alt_videos[:10]:
-                                video_title = video['title'].lower()
-                                if any(word in video_title for word in artist_name_lower.split()):
-                                    artist_videos += 1
-                            
-                            if artist_videos >= max(2, len(alt_videos[:10]) * 0.3):
-                                return alt_channel, "FOUND", search_queries
-        except:
-            # If verification fails, return best candidate anyway
-            return best_channel, "FOUND", search_queries
+                        # Check for artist name
+                        if any(word in video_title for word in artist_name_lower.split()):
+                            artist_videos += 1
+                        
+                        # Check for music video indicators
+                        music_indicators = ['official video', 'music video', 'mv', 'audio', 'lyric']
+                        if any(indicator in video_title for indicator in music_indicators):
+                            music_videos += 1
+                    
+                    # Strong verification: At least 60% artist content OR official verification
+                    artist_content_ratio = artist_videos / len(channel_videos[:15]) if channel_videos[:15] else 0
+                    
+                    if (artist_content_ratio >= 0.6) or candidate['verification_status'].get('is_verified'):
+                        st.success(f"✅ Found channel with strong verification signals: {channel_name}")
+                        return channel_name, "FOUND", search_queries
+                    
+                    # Moderate verification: Good content with some official indicators
+                    if (artist_content_ratio >= 0.4 and music_videos >= 3) or candidate['verification_status'].get('is_official_artist'):
+                        st.info(f"ℹ️ Found channel with moderate verification: {channel_name}")
+                        return channel_name, "FOUND", search_queries
+            
+            except Exception as e:
+                continue
+        
+        # If no channel passed enhanced verification, return the top candidate
+        best_channel = all_candidates[0]['channel']
+        st.warning(f"⚠️ Using best available channel: {best_channel}")
+        return best_channel, "FOUND", search_queries
     
     return None, "NOT_FOUND", search_queries
 
@@ -1896,4 +1911,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
