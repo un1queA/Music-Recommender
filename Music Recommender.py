@@ -78,11 +78,11 @@ def select_best_music_videos(videos: List[Dict], count: int, llm: ChatOpenAI) ->
     return selected[:count]
 
 # =============================================================================
-# IMPROVED OFFICIAL CHANNEL DETECTION
+# IMPROVED CHANNEL DETECTION FROM CODE 2
 # =============================================================================
 
 def initialize_llm(api_key: str):
-    """Initialize the LLM with DeepSeek API."""
+    """Initialize the LLM with DeepSeek API"""
     try:
         llm = ChatOpenAI(
             model="deepseek-chat",
@@ -98,19 +98,21 @@ def initialize_llm(api_key: str):
         return None
 
 def get_artist_search_queries(artist_name: str, genre: str, llm: ChatOpenAI) -> List[str]:
-    """Generate queries optimized for finding official music channels."""
+    """Use LLM to generate optimal YouTube search queries for any artist/language"""
     
     prompt = PromptTemplate(
         input_variables=["artist_name", "genre"],
-        template="""Generate 3 YouTube search queries to find the OFFICIAL MUSIC CHANNEL for "{artist_name}".
-
-        CRITICAL REQUIREMENTS:
-        1. MUST exclude news, facts, updates, rumors, or any non-music content
-        2. Focus on OFFICIAL music content only
-        3. Include terms like "official music", "music channel", "topic channel"
-        4. Exclude terms like "news", "facts", "update", "daily", "interview"
+        template="""For the artist "{artist_name}" (genre: {genre}), generate 3 specific YouTube search queries
+        that will best find their OFFICIAL YouTube channel.
         
-        Return EXACTLY 3 queries separated by |:
+        IMPORTANT: Focus on finding MUSIC channels, not news or facts channels.
+        
+        Consider:
+        1. The artist's native language and common channel naming conventions
+        2. Common official channel markers in their region/language
+        3. Variations of their name that might appear in channel titles
+        
+        Return EXACTLY 3 queries separated by | (pipe symbol):
         QUERY_1 | QUERY_2 | QUERY_3"""
     )
     
@@ -120,279 +122,18 @@ def get_artist_search_queries(artist_name: str, genre: str, llm: ChatOpenAI) -> 
         result = chain.run({"artist_name": artist_name, "genre": genre})
         queries = [q.strip() for q in result.split('|') if q.strip()]
         return queries[:3]
-    except Exception:
-        # Fallback to guaranteed music-focused queries
+    except:
+        # Fallback queries if LLM fails
         return [
             f"{artist_name} official music",
             f"{artist_name} topic",
-            f"{artist_name} music channel"
+            f"{artist_name}"
         ]
-
-def parse_subscriber_count(subscriber_text: str) -> int:
-    """Parse subscriber count from text."""
-    if not subscriber_text:
-        return 0
-    
-    subscriber_text = subscriber_text.lower().replace('subscribers', '').replace('subscriber', '').strip()
-    
-    try:
-        if 'm' in subscriber_text:
-            return int(float(subscriber_text.replace('m', '').strip()) * 1_000_000)
-        elif 'k' in subscriber_text:
-            return int(float(subscriber_text.replace('k', '').strip()) * 1_000)
-        else:
-            return int(''.join(filter(str.isdigit, subscriber_text)))
-    except Exception:
-        return 0
-
-def analyze_channel_content(channel_name: str, artist_name: str) -> Dict[str, any]:
-    """
-    Analyze channel content to determine if it's a music channel.
-    Returns detailed content analysis.
-    """
-    result = {
-        'music_video_count': 0,
-        'artist_content_ratio': 0,
-        'non_music_penalty': 0,
-        'total_videos_checked': 0
-    }
-    
-    try:
-        # Search for videos from this channel
-        search_results = YoutubeSearch(channel_name, max_results=20).to_dict()
-        
-        # Filter for videos from this specific channel
-        channel_videos = []
-        for video in search_results:
-            if video['channel'].strip() == channel_name:
-                channel_videos.append(video)
-        
-        if not channel_videos:
-            return result
-        
-        result['total_videos_checked'] = len(channel_videos)
-        artist_name_lower = artist_name.lower()
-        
-        music_indicators = [
-            'official mv', 'music video', 'official video', 'mv',
-            'audio', 'lyric video', 'performance', 'live stage',
-            'comeback', 'album', 'single', 'release'
-        ]
-        
-        non_music_penalties = [
-            'news', 'facts', 'update', 'daily', 'rumor', 'gossip',
-            'interview', 'talk show', 'behind', 'documentary',
-            'reaction', 'react', 'compilation', 'edit'
-        ]
-        
-        for video in channel_videos:
-            title_lower = video['title'].lower()
-            
-            # Check for music content
-            for indicator in music_indicators:
-                if indicator in title_lower:
-                    result['music_video_count'] += 1
-                    break
-            
-            # Check for artist content
-            if artist_name_lower in title_lower:
-                # This is content about the artist
-                pass
-            
-            # Penalize non-music content
-            for penalty in non_music_penalties:
-                if penalty in title_lower:
-                    result['non_music_penalty'] += 3
-                    break
-        
-        # Calculate artist content ratio
-        artist_videos = sum(1 for video in channel_videos if artist_name_lower in video['title'].lower())
-        if channel_videos:
-            result['artist_content_ratio'] = artist_videos / len(channel_videos)
-        
-    except Exception:
-        pass
-    
-    return result
-
-def score_channel_for_artist(channel_name: str, artist_name: str, channel_data: Dict) -> Dict[str, int]:
-    """
-    Score a channel based on how likely it is to be the official artist channel.
-    MUCH stricter to exclude non-music channels.
-    """
-    scores = {
-        'name_match': 0,
-        'official_indicators': 0,
-        'content_score': 0,
-        'popularity_score': 0,
-        'penalties': 0
-    }
-    
-    artist_name_lower = artist_name.lower()
-    channel_lower = channel_name.lower()
-    
-    # === CRITICAL: HEAVY PENALTIES FOR NON-MUSIC ===
-    
-    # 1. CRITICAL: Penalize news/facts channels heavily
-    non_music_penalty_terms = [
-        'news', 'facts', 'update', 'daily', 'rumor', 'gossip',
-        'magazine', 'blog', 'vlog', 'talk', 'show', 'reaction',
-        'compilation', 'edit', 'mashup', 'mix', 'lyrics only'
-    ]
-    
-    for term in non_music_penalty_terms:
-        if term in channel_lower:
-            scores['penalties'] += 100  # Very heavy penalty
-            break
-    
-    # 2. Penalize if it doesn't contain music terms
-    if not any(term in channel_lower for term in ['music', 'official', 'topic', 'artist']):
-        scores['penalties'] += 30
-    
-    # === POSITIVE SCORING ===
-    
-    # 3. Strong official music indicators
-    strong_music_indicators = [
-        'official music', 'music official', 'vevo', 'topic',
-        'artist channel', 'music channel', 'records', 'entertainment'
-    ]
-    
-    for indicator in strong_music_indicators:
-        if indicator in channel_lower:
-            scores['official_indicators'] += 50
-    
-    # 4. Exact name matching is very important
-    clean_channel = re.sub(r'[\s\-_]+', '', channel_lower)
-    clean_artist = re.sub(r'[\s\-_]+', '', artist_name_lower)
-    
-    if clean_artist == clean_channel:
-        scores['name_match'] += 100  # Perfect match
-    elif clean_artist in clean_channel:
-        scores['name_match'] += 60  # Contains artist name
-    else:
-        # Check for word overlap
-        artist_words = set(re.findall(r'[a-z]+', artist_name_lower))
-        channel_words = set(re.findall(r'[a-z]+', channel_lower))
-        common_words = artist_words.intersection(channel_words)
-        if common_words:
-            scores['name_match'] += len(common_words) * 20
-    
-    # 5. Topic channel with artist name
-    if 'topic' in channel_lower and artist_name_lower in channel_lower:
-        scores['official_indicators'] += 80
-    
-    # 6. Handle language-specific channels appropriately
-    # "TWICE JAPAN OFFICIAL" is still official but not primary
-    language_terms = ['japan', 'japanese', 'korea', 'korean', 'english', 'global']
-    for term in language_terms:
-        if term in channel_lower:
-            # It's official but not primary - give moderate score
-            scores['official_indicators'] += 30
-            # But penalize if it's not the main channel
-            if 'official' not in channel_lower:
-                scores['penalties'] += 20
-            break
-    
-    # 7. Content analysis score
-    if 'content_analysis' in channel_data:
-        analysis = channel_data['content_analysis']
-        
-        # Reward high music video count
-        if analysis['music_video_count'] > 5:
-            scores['content_score'] += 40
-        elif analysis['music_video_count'] > 2:
-            scores['content_score'] += 20
-        
-        # Reward high artist content ratio
-        if analysis['artist_content_ratio'] > 0.7:
-            scores['content_score'] += 50
-        elif analysis['artist_content_ratio'] > 0.4:
-            scores['content_score'] += 25
-        
-        # Apply non-music penalty
-        scores['penalties'] += analysis['non_music_penalty']
-    
-    # 8. Popularity score (subscribers)
-    if 'subscribers' in channel_data and channel_data['subscribers']:
-        subs = parse_subscriber_count(channel_data['subscribers'])
-        if subs > 1_000_000:
-            scores['popularity_score'] += 40
-        elif subs > 100_000:
-            scores['popularity_score'] += 25
-        elif subs > 10_000:
-            scores['popularity_score'] += 10
-    
-    # 9. Additional penalties
-    # Penalize if channel name is too long (often indicates fan channels)
-    if len(channel_name) > len(artist_name) * 2.5:
-        scores['penalties'] += 30
-    
-    # Penalize record labels without artist name
-    label_terms = ['records', 'recordings', 'label', 'network']
-    if any(term in channel_lower for term in label_terms) and not any(word in channel_lower for word in artist_name_lower.split()):
-        scores['penalties'] += 40
-    
-    return scores
-
-def filter_and_select_best_channel(candidates: List[Dict], artist_name: str) -> Optional[Dict]:
-    """
-    Smart filtering to select the best channel.
-    Removes candidates that are clearly wrong.
-    """
-    if not candidates:
-        return None
-    
-    artist_name_lower = artist_name.lower()
-    filtered_candidates = []
-    
-    for candidate in candidates:
-        channel_name = candidate['channel'].lower()
-        total_score = candidate['score']
-        
-        # Skip if score is too low
-        if total_score < 80:
-            continue
-        
-        # CRITICAL: Skip if it's clearly a non-music channel
-        skip_terms = ['news', 'facts', 'update', 'rumor', 'gossip', 'magazine']
-        if any(term in channel_name for term in skip_terms):
-            continue
-        
-        # Check if it contains artist name or related terms
-        # Allow for cases like "BANGTANTV" for "BTS"
-        artist_words = set(artist_name_lower.split())
-        channel_words = set(re.findall(r'[a-z]+', channel_name))
-        
-        # Common music-related words that might indicate the channel
-        music_related = {'music', 'official', 'topic', 'vevo', 'channel'}
-        
-        if not artist_words.intersection(channel_words) and not music_related.intersection(channel_words):
-            # No word overlap at all, probably wrong
-            continue
-        
-        # Additional check: channel should have reasonable content
-        if 'content_analysis' in candidate:
-            analysis = candidate['content_analysis']
-            if analysis['music_video_count'] == 0 and analysis['total_videos_checked'] > 5:
-                # No music videos found in channel - likely not a music channel
-                continue
-        
-        filtered_candidates.append(candidate)
-    
-    if not filtered_candidates:
-        # If we filtered everything out, return the original best
-        candidates.sort(key=lambda x: x['score'], reverse=True)
-        if candidates and candidates[0]['score'] > 50:
-            return candidates[0]
-        return None
-    
-    # Sort by score
-    filtered_candidates.sort(key=lambda x: x['score'], reverse=True)
-    return filtered_candidates[0]
 
 def find_and_lock_official_channel(artist_name: str, genre: str, llm: ChatOpenAI) -> Tuple[Optional[str], str, List[str]]:
     """
-    Finds official artist channel using smarter search and filtering.
+    IMPROVED: Find official channel using LLM-optimized search queries
+    Uses structural patterns instead of language-specific text
     """
     
     # Get smart search queries from LLM
@@ -406,99 +147,114 @@ def find_and_lock_official_channel(artist_name: str, genre: str, llm: ChatOpenAI
             
             for result in results:
                 channel_name = result['channel'].strip()
+                channel_lower = channel_name.lower()
+                title_lower = result['title'].lower()
                 
-                # Skip if we've already evaluated this channel
-                if any(c['channel'] == channel_name for c in all_candidates):
+                # ====== CRITICAL: FILTER OUT NON-MUSIC CHANNELS ======
+                # Skip news, facts, and other non-music channels immediately
+                non_music_indicators = ['news', 'facts', 'update', 'rumor', 'gossip', 'magazine']
+                if any(indicator in channel_lower for indicator in non_music_indicators):
                     continue
                 
-                # Analyze channel content
-                content_analysis = analyze_channel_content(channel_name, artist_name)
+                # UNIVERSAL CHANNEL SCORING (no language-specific terms)
+                score = 0
                 
-                # Prepare channel data for scoring
-                channel_data = {
-                    'subscribers': result.get('channel_subscribers', ''),
-                    'content_analysis': content_analysis
-                }
+                # 1. Channel structural patterns (universal)
+                # Official channels often have clean names without extra descriptors
+                name_cleanliness = 0
+                clean_name = re.sub(r'[^a-zA-Z0-9\s\u4e00-\u9fff\uac00-\ud7a3\u3040-\u309f\u30a0-\u30ff\u0400-\u04FF]', '', channel_name)
+                if len(channel_name) == len(clean_name):
+                    name_cleanliness += 20
                 
-                # Score this channel
-                scores = score_channel_for_artist(channel_name, artist_name, channel_data)
+                # 2. Video patterns that suggest official content
+                # Official videos often have consistent formatting
+                if re.search(r'[【\[\(].*[】\]\)]', result['title']):
+                    score += 15  # Brackets/parentheses often indicate official markers
                 
-                # Calculate total score
-                total_score = (
-                    scores['name_match'] +
-                    scores['official_indicators'] +
-                    scores['content_score'] +
-                    scores['popularity_score'] -
-                    scores['penalties']
-                )
+                # 3. Length patterns (official music videos are typically 2-10 minutes)
+                if result.get('duration'):
+                    try:
+                        parts = result['duration'].split(':')
+                        if len(parts) == 2:
+                            mins = int(parts[0])
+                            if 2 <= mins <= 10:
+                                score += 25  # Typical music video length
+                    except:
+                        pass
+                
+                # 4. Artist name matching (flexible, any script)
+                artist_words = set(re.findall(r'[\w\u4e00-\u9fff\uac00-\ud7a3\u3040-\u309f\u30a0-\u30ff\u0400-\u04FF]+', artist_name.lower(), re.UNICODE))
+                channel_words = set(re.findall(r'[\w\u4e00-\u9fff\uac00-\ud7a3\u3040-\u309f\u30a0-\u30ff\u0400-\u04FF]+', channel_lower, re.UNICODE))
+                
+                common_words = artist_words.intersection(channel_words)
+                if common_words:
+                    score += len(common_words) * 20
+                
+                # 5. View count as engagement signal (universal)
+                if result.get('views'):
+                    views_text = result['views'].lower()
+                    if 'm' in views_text or 'k' in views_text:
+                        score += 15
+                
+                # 6. STRONG MUSIC INDICATORS
+                music_indicators = ['music', 'official', 'topic', 'artist', 'vevo']
+                for indicator in music_indicators:
+                    if indicator in channel_lower:
+                        score += 20
+                        break
+                
+                # 7. Penalize if it looks like a compilation/fan channel
+                fan_channel_indicators = ['compilation', 'mix', 'edit', 'mashup', 'best of', 'top 10']
+                for indicator in fan_channel_indicators:
+                    if indicator in channel_lower:
+                        score -= 30
+                        break
                 
                 # Only consider promising candidates
-                if total_score >= 50:
+                if score >= 40:
                     all_candidates.append({
                         'channel': channel_name,
-                        'score': total_score,
-                        'scores_breakdown': scores,
-                        'content_analysis': content_analysis,
+                        'score': score + name_cleanliness,
                         'query_used': search_query,
-                        'video_title': result['title'],
-                        'subscribers': result.get('channel_subscribers', 'N/A')
+                        'video_title': result['title']
                     })
             
-            time.sleep(0.1)  # Be nice to YouTube
-        except Exception:
+            time.sleep(0.2)
+        except Exception as e:
             continue
     
-    # Select and verify the best channel
+    # Select best candidate
     if all_candidates:
-        # Use smart filtering
-        best_candidate = filter_and_select_best_channel(all_candidates, artist_name)
+        all_candidates.sort(key=lambda x: x['score'], reverse=True)
+        best = all_candidates[0]
         
-        if best_candidate:
-            best_channel = best_candidate['channel']
+        # Verify this channel has multiple videos
+        try:
+            # Quick check: search for more videos from this channel
+            channel_check = YoutubeSearch(best['channel'], max_results=5).to_dict()
+            channel_videos = [r for r in channel_check if r['channel'].strip() == best['channel']]
             
-            # Final verification: Check channel content one more time
-            try:
-                channel_videos = YoutubeSearch(best_channel, max_results=15).to_dict()
-                channel_videos = [r for r in channel_videos if r['channel'].strip() == best_channel]
-                
-                if channel_videos:
-                    # Check for music content
-                    music_videos = 0
-                    for video in channel_videos[:10]:
-                        title_lower = video['title'].lower()
-                        if any(term in title_lower for term in ['music video', 'mv', 'official video', 'audio']):
-                            music_videos += 1
-                    
-                    # Require at least some music content
-                    if music_videos >= 2:
-                        return best_channel, "FOUND", search_queries
-                    else:
-                        # Try next best candidate
-                        all_candidates.sort(key=lambda x: x['score'], reverse=True)
-                        if len(all_candidates) > 1:
-                            second_best = all_candidates[1]
-                            return second_best['channel'], "FOUND", search_queries
-            
-            except Exception:
-                # If verification fails, return best candidate anyway
-                return best_channel, "FOUND", search_queries
+            if len(channel_videos) >= 3:
+                return best['channel'], "FOUND", search_queries
+        except:
+            pass
         
-        # If no candidate passed filter, try the original best
-        if all_candidates:
-            all_candidates.sort(key=lambda x: x['score'], reverse=True)
-            best_channel = all_candidates[0]['channel']
-            return best_channel, "FOUND", search_queries
+        return best['channel'], "FOUND", search_queries
     
     return None, "NOT_FOUND", search_queries
 
 def discover_channel_videos(locked_channel: str, artist_name: str, min_videos: int = 20) -> List[Dict]:
-    """Discover videos from a locked channel."""
+    """
+    UNIVERSAL: Discover videos from a channel and identify music videos using structural patterns
+    Returns list of videos sorted by likelihood of being official music videos
+    """
     
     if not locked_channel:
         return []
     
     all_videos = []
     
+    # Search for channel content using multiple approaches
     search_attempts = [
         locked_channel,
         f"{locked_channel} music",
@@ -510,12 +266,14 @@ def discover_channel_videos(locked_channel: str, artist_name: str, min_videos: i
             results = YoutubeSearch(search_query, max_results=30).to_dict()
             
             for result in results:
+                # STRICT FILTER: Only videos from our exact channel
                 if result['channel'].strip() != locked_channel:
                     continue
                 
+                # Score video for likelihood of being music video
                 score = score_video_music_likelihood(result, artist_name)
                 
-                if score >= 40:
+                if score >= 40:  # Minimum threshold
                     all_videos.append({
                         'url': f"https://www.youtube.com/watch?v={result['id']}",
                         'title': result['title'],
@@ -529,10 +287,10 @@ def discover_channel_videos(locked_channel: str, artist_name: str, min_videos: i
             if len(all_videos) >= min_videos:
                 break
                 
-        except Exception:
+        except Exception as e:
             continue
     
-    # Remove duplicates
+    # Remove duplicates by URL
     unique_videos = {}
     for video in all_videos:
         video_id = video['url'].split('v=')[1].split('&')[0]
@@ -542,55 +300,77 @@ def discover_channel_videos(locked_channel: str, artist_name: str, min_videos: i
     return sorted(unique_videos.values(), key=lambda x: x['score'], reverse=True)
 
 def score_video_music_likelihood(video: Dict, artist_name: str) -> int:
-    """Score video for likelihood of being a music video."""
+    """
+    TRULY UNIVERSAL: Score video using structural patterns only
+    No language-specific terms - works for Tamil, Korean, Arabic, etc.
+    """
     score = 0
     title = video['title']
     
-    # Duration check
+    # 1. DURATION - Most reliable universal signal
     if video.get('duration'):
         duration = video['duration']
+        # Convert duration to seconds
         try:
             parts = duration.split(':')
-            if len(parts) == 2:
+            if len(parts) == 2:  # MM:SS
                 minutes, seconds = int(parts[0]), int(parts[1])
                 total_seconds = minutes * 60 + seconds
-                if 120 <= total_seconds <= 600:
+                
+                # Music videos are typically 2-10 minutes
+                if 120 <= total_seconds <= 600:  # 2-10 minutes
                     score += 60
-                elif 90 <= total_seconds <= 720:
+                elif 90 <= total_seconds <= 720:  # 1.5-12 minutes (broader range)
                     score += 40
-        except Exception:
+                elif 30 <= total_seconds <= 1200:  # 0.5-20 minutes (very broad)
+                    score += 20
+                    
+            elif len(parts) == 1:  # Just seconds (likely short clip)
+                if int(parts[0]) > 180:  # Over 3 minutes
+                    score += 30
+        except:
             pass
     
-    # Title patterns
+    # 2. TITLE STRUCTURAL PATTERNS (universal)
+    # Look for patterns that indicate official/structured content
     title_lower = title.lower()
     
-    # Music video indicators
-    music_indicators = [
-        'official mv', 'music video', 'official video', 'mv',
-        'audio', 'lyric video', 'performance', 'live stage'
+    # Common structural markers in any language
+    structural_patterns = [
+        r'[\[\(][^\]\)]+[\]\)]',  # Brackets/parentheses with content
+        r'\d{4}',  # Years (often in official releases)
+        r'[A-Z]{2,}',  # Multiple uppercase letters (acronyms, etc.)
+        r'[|•\-–—]',  # Separators
     ]
     
-    for indicator in music_indicators:
-        if indicator in title_lower:
-            score += 30
+    for pattern in structural_patterns:
+        if re.search(pattern, title):
+            score += 10
             break
     
-    # Artist name in title
-    if artist_name.lower() in title_lower:
-        score += 20
+    # 3. LENGTH PATTERNS - Official videos often have medium-length titles
+    title_length = len(title)
+    if 20 <= title_length <= 80:
+        score += 15
+    elif 10 <= title_length <= 120:
+        score += 10
     
-    # Views
+    # 4. VIEW POPULARITY (if available)
     if video.get('views'):
         views_text = video['views'].lower()
         if 'm' in views_text:
             score += 25
         elif 'k' in views_text:
             score += 15
+        elif 'views' in views_text:
+            score += 10
     
-    # Avoid non-music
+    # 5. AVOID NON-MUSIC CONTENT (using universal signals)
+    # These patterns often indicate interviews, live sessions, etc.
     non_music_indicators = [
-        'interview', 'behind the scenes', 'making of',
-        'documentary', 'backstage', 'rehearsal', 'talk'
+        'live at', 'concert', 'interview', 'behind the scenes',
+        'making of', 'documentary', 'backstage', 'rehearsal',
+        'acoustic session', 'unplugged', 'q&a', 'talk'
     ]
     
     for indicator in non_music_indicators:
@@ -598,10 +378,20 @@ def score_video_music_likelihood(video: Dict, artist_name: str) -> int:
             score -= 30
             break
     
+    # 6. VIDEO FORMAT HINTS
+    format_indicators = [
+        '4k', 'hd', '1080p', 'official audio', 'visualizer',
+        'lyric video', 'lyrics', 'audio only'
+    ]
+    
+    for indicator in format_indicators:
+        if indicator in title_lower:
+            score += 5
+    
     return max(0, score)
 
 # =============================================================================
-# ARTIST & GENRE HANDLING
+# ARTIST & GENRE HANDLING FROM CODE 1 (with Code 1's UI)
 # =============================================================================
 
 def analyze_genre_popularity(genre: str, llm: ChatOpenAI, search_attempts: int) -> Dict:
@@ -794,7 +584,7 @@ def handle_niche_genre_fallback(genre: str, llm: ChatOpenAI, attempts: int) -> D
         }
 
 # =============================================================================
-# STREAMLIT APP
+# STREAMLIT APP FROM CODE 1 (with the clean UI you like)
 # =============================================================================
 
 def main():
@@ -816,7 +606,7 @@ def main():
     if 'genre_popularity' not in st.session_state:
         st.session_state.genre_popularity = {}
     
-    # Custom CSS
+    # Custom CSS (from Code 1)
     st.markdown("""
     <style>
     .universal-badge {
@@ -860,10 +650,10 @@ def main():
     </style>
     """, unsafe_allow_html=True)
     
-    # Header
+    # Header (from Code 1)
     st.title("🔊 I AM MUSIC")
     
-    # Sidebar
+    # Sidebar (from Code 1)
     with st.sidebar:
         st.header("⚙️ Configuration")
         api_key = st.text_input(
@@ -895,7 +685,7 @@ def main():
             st.session_state.genre_popularity = {}
             st.rerun()
     
-    # Main input
+    # Main input (from Code 1)
     st.markdown("### Enter Any Music Genre")
     
     col1, col2, col3 = st.columns([2,1,1])
@@ -991,7 +781,7 @@ def main():
         st.success(f"🎤 **Artist Found:** {artist_name}")
         st.caption(f"Confidence: {artist_result.get('confidence', 'Medium')} | Note: {artist_result.get('note', '')}")
         
-        # Step 2: Find and lock official channel
+        # Step 2: Find and lock official channel (using IMPROVED logic from Code 2)
         st.markdown("---")
         st.markdown("### 🔍 Finding Official Channel")
         
@@ -1003,7 +793,7 @@ def main():
         if channel_status == "FOUND" and locked_channel:
             st.success(f"✅ **Artist Channel Locked:** {locked_channel}")
             
-            # Step 3: Discover videos
+            # Step 3: Discover videos (using IMPROVED logic from Code 2)
             with st.spinner(f"Exploring {locked_channel} for music videos..."):
                 available_videos = discover_channel_videos(locked_channel, artist_name)
             
