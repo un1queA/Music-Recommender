@@ -1,28 +1,84 @@
 # prerequisites:
-# pip install streamlit langchain-openai langchain-core google-api-python-client wikipedia-api requests isodate
+# pip install langchain-openai youtube-search streamlit langchain_core
 # Run: streamlit run app.py
 
 import streamlit as st
 import re
-import time
-import json
-import requests
 from typing import Dict, List, Optional, Tuple
-import wikipediaapi
-from difflib import SequenceMatcher
-import isodate
+from youtube_search import YoutubeSearch
+import time
 
 # Import LangChain components
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import PromptTemplate
 from langchain.chains import LLMChain
 
-# Import YouTube Data API
-from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
+# =============================================================================
+# LLM-POWERED SONG DEDUPLICATION
+# =============================================================================
+
+def are_songs_different_llm(title1: str, title2: str, llm: ChatOpenAI) -> bool:
+    """Use LLM to determine if two videos represent different songs."""
+    
+    prompt = PromptTemplate(
+        input_variables=["title1", "title2"],
+        template="""Analyze these YouTube video titles:
+        Title 1: "{title1}"
+        Title 2: "{title2}"
+        
+        Are these DIFFERENT SONGS or just different versions of the SAME SONG?
+        
+        Return EXACTLY:
+        DIFFERENT: [YES/NO]
+        REASON: [Brief explanation]"""
+    )
+    
+    chain = LLMChain(llm=llm, prompt=prompt)
+    
+    try:
+        result = chain.run({"title1": title1, "title2": title2})
+        different = "NO"
+        for line in result.strip().split('\n'):
+            if line.startswith("DIFFERENT:"):
+                different = line.replace("DIFFERENT:", "").strip().upper()
+                break
+        return different == "YES"
+    except Exception:
+        return title1 != title2
+
+def select_best_music_videos(videos: List[Dict], count: int, llm: ChatOpenAI) -> List[Dict]:
+    """Select the best music videos using LLM to ensure different songs."""
+    
+    if not videos or not llm:
+        return videos[:count] if videos else []
+    
+    if len(videos) <= count:
+        return videos[:count]
+    
+    sorted_videos = sorted(videos, key=lambda x: x.get('score', 0), reverse=True)
+    selected = []
+    
+    for video in sorted_videos:
+        if len(selected) >= count:
+            break
+        
+        is_different_song = True
+        if selected:
+            for selected_video in selected:
+                if not are_songs_different_llm(video['title'], selected_video['title'], llm):
+                    is_different_song = False
+                    break
+        
+        if is_different_song:
+            selected.append(video)
+    
+    if len(selected) < count:
+        selected = sorted_videos[:count]
+    
+    return selected[:count]
 
 # =============================================================================
-# 100% ACCURATE CHANNEL LOCKING SYSTEM
+# UNIVERSAL CHANNEL DETECTION WITH LLM
 # =============================================================================
 
 def initialize_llm(api_key: str):
@@ -41,801 +97,371 @@ def initialize_llm(api_key: str):
         st.error(f"Failed to initialize DeepSeek API: {e}")
         return None
 
-def get_youtube_client(api_key: str):
-    """Initialize YouTube Data API client"""
-    if not api_key:
-        return None
-    try:
-        youtube = build('youtube', 'v3', developerKey=api_key)
-        return youtube
-    except Exception as e:
-        st.error(f"Failed to initialize YouTube API: {e}")
-        return None
-
-# =============================================================================
-# LAYER 1: YOUTUBE DATA API (OFFICIAL SOURCE)
-# =============================================================================
-
-def get_channels_from_youtube_api(artist_name: str, youtube) -> List[Dict]:
-    """Layer 1: Official YouTube Data API with verified channel detection"""
+def identify_channel_type_llm(channel_name: str, artist_name: str, video_title: str, llm: ChatOpenAI) -> Dict:
+    """
+    Use LLM to universally identify if a channel is the artist's official channel,
+    a company/label channel, or a topic channel.
+    """
     
-    if not youtube:
-        return []
+    prompt = PromptTemplate(
+        input_variables=["channel_name", "artist_name", "video_title"],
+        template="""Analyze this YouTube channel:
+        
+        Channel Name: "{channel_name}"
+        Artist Name: "{artist_name}"
+        Sample Video Title: "{video_title}"
+        
+        Determine the channel type:
+        
+        1. ARTIST_OFFICIAL: This is the artist's own official channel (e.g., "Taylor Swift", "BTS Official", "Ariana Grande")
+        2. COMPANY_LABEL: This is a record label or company channel (e.g., "HYBE LABELS", "Republic Records", "Sony Music")
+        3. TOPIC: This is an auto-generated topic channel (e.g., "Taylor Swift - Topic")
+        4. OTHER: Something else (compilation, fan channel, etc.)
+        
+        Consider:
+        - Does the channel name match or closely match the artist name?
+        - Does it contain company/label keywords like "Records", "Entertainment", "Music Group", "Label"?
+        - Does it contain "Topic" or seem auto-generated?
+        
+        Return EXACTLY:
+        TYPE: [ARTIST_OFFICIAL/COMPANY_LABEL/TOPIC/OTHER]
+        CONFIDENCE: [High/Medium/Low]
+        REASON: [Brief explanation]"""
+    )
+    
+    chain = LLMChain(llm=llm, prompt=prompt)
     
     try:
-        # Multiple search queries for better coverage
-        search_queries = [
-            f"{artist_name} official artist channel",
-            f"{artist_name} official music",
-            f"{artist_name} -topic",
-            f"{artist_name} vevo",
-            artist_name
-        ]
+        result = chain.run({
+            "channel_name": channel_name,
+            "artist_name": artist_name,
+            "video_title": video_title
+        })
         
-        all_candidates = []
+        channel_type = "OTHER"
+        confidence = "Low"
+        reason = ""
         
-        for query in search_queries:
-            try:
-                search_response = youtube.search().list(
-                    q=query,
-                    part="snippet",
-                    type="channel",
-                    maxResults=15,
-                    safeSearch="none"
-                ).execute()
+        for line in result.strip().split('\n'):
+            if line.startswith("TYPE:"):
+                channel_type = line.replace("TYPE:", "").strip()
+            elif line.startswith("CONFIDENCE:"):
+                confidence = line.replace("CONFIDENCE:", "").strip()
+            elif line.startswith("REASON:"):
+                reason = line.replace("REASON:", "").strip()
+        
+        return {
+            "type": channel_type,
+            "confidence": confidence,
+            "reason": reason
+        }
+    except Exception:
+        return {
+            "type": "OTHER",
+            "confidence": "Low",
+            "reason": "Error analyzing channel"
+        }
+
+def get_artist_search_queries(artist_name: str, genre: str, llm: ChatOpenAI) -> List[str]:
+    """Use LLM to generate optimal YouTube search queries for any artist/language"""
+    
+    prompt = PromptTemplate(
+        input_variables=["artist_name", "genre"],
+        template="""For the artist "{artist_name}" (genre: {genre}), generate 3 specific YouTube search queries
+        that will best find their OFFICIAL ARTIST CHANNEL (not topic channel, not record label channel).
+        
+        IMPORTANT: Focus on finding the ACTUAL artist channel.
+        
+        Consider:
+        1. Search for the artist's exact name
+        2. Add "official" or "VEVO" to help find official channels
+        3. Avoid searches that return topic or label channels
+        
+        Return EXACTLY 3 queries separated by | (pipe symbol):
+        QUERY_1 | QUERY_2 | QUERY_3"""
+    )
+    
+    chain = LLMChain(llm=llm, prompt=prompt)
+    
+    try:
+        result = chain.run({"artist_name": artist_name, "genre": genre})
+        queries = [q.strip() for q in result.split('|') if q.strip()]
+        return queries[:3] if queries else [artist_name]
+    except:
+        return [artist_name, f"{artist_name} official", f"{artist_name} VEVO"]
+
+def find_and_lock_official_channel(artist_name: str, genre: str, llm: ChatOpenAI) -> Tuple[Optional[str], str, List[str]]:
+    """
+    UNIVERSAL VERSION: Use LLM to identify official artist channels across any language/genre
+    """
+    
+    # Get LLM-generated search queries
+    search_queries = get_artist_search_queries(artist_name, genre, llm)
+    
+    all_candidates = []
+    
+    for search_query in search_queries:
+        try:
+            results = YoutubeSearch(search_query, max_results=15).to_dict()
+            
+            for result in results:
+                channel_name = result['channel'].strip()
                 
-                for item in search_response.get('items', []):
-                    channel_id = item['id']['channelId']
-                    channel_title = item['snippet']['title']
-                    
-                    # Skip if we already processed this channel
-                    if any(c['id'] == channel_id for c in all_candidates):
-                        continue
-                    
-                    # Get complete channel data
-                    channel_response = youtube.channels().list(
-                        id=channel_id,
-                        part="snippet,statistics,brandingSettings,contentDetails,topicDetails,status"
-                    ).execute()
-                    
-                    if not channel_response.get('items'):
-                        continue
-                        
-                    channel_data = channel_response['items'][0]
-                    
-                    # SCORE CALCULATION
-                    score = 0
-                    indicators = []
-                    
-                    # 1. VERIFIED BADGE (MOST IMPORTANT)
-                    if channel_data.get('status', {}).get('isLinked', False):
-                        score += 200
-                        indicators.append("YouTube Verified Badge")
-                    
-                    # 2. EXACT NAME MATCH (VERY IMPORTANT)
-                    artist_clean = clean_string(artist_name)
-                    channel_clean = clean_string(channel_title)
-                    
-                    similarity = SequenceMatcher(None, artist_clean, channel_clean).ratio()
-                    
-                    if similarity == 1.0:
-                        score += 300
-                        indicators.append(f"Exact name match (100% similarity)")
-                    elif similarity >= 0.9:
-                        score += 250
-                        indicators.append(f"Very close name match ({similarity:.0%})")
-                    elif similarity >= 0.8:
-                        score += 200
-                        indicators.append(f"Close name match ({similarity:.0%})")
-                    elif similarity >= 0.6:
-                        score += 150
-                        indicators.append(f"Partial name match ({similarity:.0%})")
-                    
-                    # 3. CUSTOM URL (Official channels have this)
-                    if channel_data['snippet'].get('customUrl'):
-                        score += 100
-                        indicators.append("Has custom URL")
-                    
-                    # 4. TOPIC CATEGORIES (Music/Artist categories)
-                    topic_ids = channel_data.get('topicDetails', {}).get('topicCategories', [])
-                    if topic_ids:
-                        music_keywords = ['music', 'artist', 'entertainment', 'musician']
-                        for topic in topic_ids:
-                            if any(keyword in topic.lower() for keyword in music_keywords):
-                                score += 80
-                                indicators.append("YouTube music category verified")
-                                break
-                    
-                    # 5. SUBSCRIBER COUNT (Official channels usually have significant following)
-                    subscriber_count = int(channel_data['statistics'].get('subscriberCount', 0))
-                    if subscriber_count > 1000000:
-                        score += 150
-                        indicators.append("1M+ subscribers (established)")
-                    elif subscriber_count > 100000:
-                        score += 100
-                        indicators.append("100K+ subscribers (growing)")
-                    elif subscriber_count > 10000:
-                        score += 50
-                        indicators.append("10K+ subscribers")
-                    
-                    # 6. VIDEO COUNT (Consistency check)
-                    video_count = int(channel_data['statistics'].get('videoCount', 0))
-                    if 5 <= video_count <= 1000:  # Reasonable range for artist
-                        score += 40
-                        indicators.append(f"Reasonable video count ({video_count})")
-                    
-                    # 7. DESCRIPTION ANALYSIS (Official keywords)
-                    description = channel_data['snippet'].get('description', '').lower()
-                    official_keywords = ['official channel', 'official artist', 'vevo', 'music', 'artist channel']
-                    found_keywords = []
-                    for keyword in official_keywords:
-                        if keyword in description:
-                            found_keywords.append(keyword)
-                    
-                    if found_keywords:
-                        score += 60
-                        indicators.append(f"Official keywords: {', '.join(found_keywords[:3])}")
-                    
-                    # 8. CONTENT VERIFICATION (Check actual videos)
-                    uploads_playlist_id = channel_data.get('contentDetails', {}).get('relatedPlaylists', {}).get('uploads')
-                    if uploads_playlist_id:
-                        try:
-                            # Get a sample of videos
-                            playlist_items = youtube.playlistItems().list(
-                                playlistId=uploads_playlist_id,
-                                part="snippet",
-                                maxResults=5
-                            ).execute()
-                            
-                            music_videos = 0
-                            for video in playlist_items.get('items', []):
-                                title = video['snippet']['title'].lower()
-                                if any(term in title for term in ['official video', 'music video', 'mv', 'audio', 'song', 'single']):
-                                    music_videos += 1
-                            
-                            if music_videos >= 3:
-                                score += 120
-                                indicators.append(f"Music content verified ({music_videos}/5 videos are music)")
-                            elif music_videos >= 1:
-                                score += 60
-                                indicators.append(f"Some music content ({music_videos}/5 videos)")
-                        except:
-                            pass
-                    
-                    # 9. CHANNEL AGE (Older channels more likely to be official)
+                # Use LLM to identify channel type
+                channel_analysis = identify_channel_type_llm(
+                    channel_name,
+                    artist_name,
+                    result['title'],
+                    llm
+                )
+                
+                # Skip if not artist official channel
+                if channel_analysis["type"] != "ARTIST_OFFICIAL":
+                    continue
+                
+                # Calculate score based on various factors
+                score = 0
+                
+                # 1. LLM confidence
+                if channel_analysis["confidence"] == "High":
+                    score += 200
+                elif channel_analysis["confidence"] == "Medium":
+                    score += 100
+                else:
+                    score += 50
+                
+                # 2. Name similarity (basic check)
+                artist_clean = re.sub(r'[^\w\s]', '', artist_name.lower().strip())
+                channel_clean = re.sub(r'[^\w\s]', '', channel_name.lower().strip())
+                
+                if artist_clean == channel_clean:
+                    score += 100
+                elif artist_clean in channel_clean:
+                    score += 50
+                
+                # 3. VEVO bonus
+                if 'vevo' in channel_name.lower():
+                    score += 80
+                
+                # 4. Duration check
+                if result.get('duration'):
                     try:
-                        published_at = channel_data['snippet']['publishedAt']
-                        # Calculate age in days
-                        from datetime import datetime, timezone
-                        published_date = datetime.fromisoformat(published_at.replace('Z', '+00:00'))
-                        age_days = (datetime.now(timezone.utc) - published_date).days
-                        
-                        if age_days > 365:
-                            score += 70
-                            indicators.append(f"Established channel ({age_days//365} years old)")
+                        parts = result['duration'].split(':')
+                        if len(parts) == 2:
+                            mins = int(parts[0])
+                            if 2 <= mins <= 10:
+                                score += 30
                     except:
                         pass
-                    
-                    # 10. VIEW COUNT (Engagement)
-                    view_count = int(channel_data['statistics'].get('viewCount', 0))
-                    if view_count > 10000000:
-                        score += 80
-                        indicators.append("10M+ total views")
-                    elif view_count > 1000000:
-                        score += 50
-                        indicators.append("1M+ total views")
-                    
-                    # Only consider promising candidates
-                    if score >= 200:
-                        all_candidates.append({
-                            'id': channel_id,
-                            'title': channel_title,
-                            'description': channel_data['snippet'].get('description', '')[:300],
-                            'thumbnail': channel_data['snippet']['thumbnails']['high']['url'],
-                            'subscribers': subscriber_count,
-                            'videos': video_count,
-                            'views': view_count,
-                            'score': score,
-                            'indicators': indicators,
-                            'uploads_playlist_id': uploads_playlist_id,
-                            'custom_url': channel_data['snippet'].get('customUrl'),
-                            'verified': channel_data.get('status', {}).get('isLinked', False)
-                        })
                 
-                time.sleep(0.1)  # Avoid rate limiting
+                # 5. View count
+                if result.get('views'):
+                    views_text = result['views'].lower()
+                    if 'm' in views_text:
+                        score += 40
+                    elif 'k' in views_text:
+                        score += 20
                 
-            except Exception as e:
-                continue
-        
-        # Remove duplicates and sort by score
-        unique_candidates = []
-        seen_ids = set()
-        for candidate in all_candidates:
-            if candidate['id'] not in seen_ids:
-                seen_ids.add(candidate['id'])
-                unique_candidates.append(candidate)
-        
-        return sorted(unique_candidates, key=lambda x: x['score'], reverse=True)
-        
-    except Exception as e:
-        st.error(f"YouTube API Error: {e}")
-        return []
-
-def clean_string(text: str) -> str:
-    """Clean string for comparison"""
-    if not text:
-        return ""
-    # Remove extra spaces, convert to lowercase, remove special chars
-    text = re.sub(r'\s+', ' ', text.lower().strip())
-    text = re.sub(r'[^\w\s]', '', text)
-    return text
-
-# =============================================================================
-# LAYER 2: WIKIPEDIA/MUSICBRAINZ VERIFICATION
-# =============================================================================
-
-def cross_reference_with_wikidata(artist_name: str, youtube_channels: List[Dict]) -> List[Dict]:
-    """Layer 2: Cross-reference with Wikipedia for verification"""
-    
-    if not youtube_channels:
-        return youtube_channels
-    
-    try:
-        # Initialize Wikipedia API
-        wiki_wiki = wikipediaapi.Wikipedia(
-            user_agent='IAMUSIC/1.0 (music-discovery-tool)',
-            language='en'
-        )
-        
-        # Search Wikipedia
-        wiki_page = wiki_wiki.page(artist_name)
-        
-        if not wiki_page.exists():
-            # Try alternative names
-            for channel in youtube_channels[:3]:  # Check top 3 channel names
-                wiki_page = wiki_wiki.page(channel['title'])
-                if wiki_page.exists():
-                    break
-        
-        if wiki_page.exists():
-            content = wiki_page.text.lower()
-            summary = wiki_page.summary.lower()
+                # Only consider strong candidates
+                if score >= 150:
+                    all_candidates.append({
+                        'channel': channel_name,
+                        'score': score,
+                        'query_used': search_query,
+                        'video_title': result['title'],
+                        'views': result.get('views', ''),
+                        'llm_analysis': channel_analysis
+                    })
             
-            for channel in youtube_channels:
-                channel_title = channel['title'].lower()
-                channel_id = channel['id']
-                
-                # Check if channel name appears in Wikipedia
-                if channel_title in content or channel_title in summary:
-                    channel['score'] += 100
-                    channel['indicators'].append("Verified by Wikipedia")
-                    
-                    # Extract YouTube URL from Wikipedia if available
-                    if 'youtube.com' in content or 'youtube.com' in summary:
-                        channel['score'] += 50
-                        channel['indicators'].append("YouTube link found in Wikipedia")
+            time.sleep(0.3)
+        except Exception:
+            continue
+    
+    # Select best candidate
+    if all_candidates:
+        all_candidates.sort(key=lambda x: x['score'], reverse=True)
+        best = all_candidates[0]
         
-        # Try MusicBrainz API for additional verification
+        # Verify channel has content featuring the artist
         try:
-            musicbrainz_url = f"https://musicbrainz.org/ws/2/artist?query={artist_name}&fmt=json"
-            response = requests.get(musicbrainz_url, timeout=10)
+            channel_check = YoutubeSearch(f"{best['channel']} {artist_name}", max_results=10).to_dict()
+            channel_videos = [
+                r for r in channel_check 
+                if r['channel'].strip() == best['channel']
+            ]
             
-            if response.status_code == 200:
-                artists = response.json().get('artists', [])
-                if artists:
-                    # Get the first artist (most relevant)
-                    artist_data = artists[0]
-                    
-                    # Check for YouTube relations
-                    relations = artist_data.get('relations', [])
-                    youtube_relations = [r for r in relations if r.get('type') == 'youtube' and r.get('url')]
-                    
-                    for relation in youtube_relations:
-                        youtube_url = relation['url']
-                        # Extract channel ID from URL
-                        for channel in youtube_channels:
-                            if channel['id'] in youtube_url or channel['custom_url'] in youtube_url:
-                                channel['score'] += 150
-                                channel['indicators'].append("Verified by MusicBrainz")
+            if len(channel_videos) >= 2:
+                return best['channel'], "FOUND", search_queries
         except:
             pass
         
-        return youtube_channels
-        
-    except Exception as e:
-        # If Wikipedia fails, return original channels
-        return youtube_channels
-
-# =============================================================================
-# LAYER 3: SOCIAL MEDIA VERIFICATION
-# =============================================================================
-
-def verify_social_media_links(artist_name: str, channels: List[Dict]) -> List[Dict]:
-    """Layer 3: Check for social media links in channel descriptions"""
+        return best['channel'], "FOUND", search_queries
     
-    verified_channels = []
-    
-    for channel in channels:
-        description = channel.get('description', '').lower()
-        score_boost = 0
-        new_indicators = []
-        
-        # Common social media platforms for artists
-        social_platforms = {
-            'instagram.com/': 'Instagram link found',
-            'twitter.com/': 'Twitter link found',
-            'facebook.com/': 'Facebook link found',
-            'tiktok.com/': 'TikTok link found',
-            'spotify.com/': 'Spotify link found',
-            'apple.co/': 'Apple Music link found',
-            'open.spotify.com/': 'Spotify artist profile',
-            'music.apple.com/': 'Apple Music artist profile',
-            'soundcloud.com/': 'SoundCloud link found',
-            'bandcamp.com/': 'Bandcamp link found'
-        }
-        
-        found_platforms = []
-        for platform, indicator in social_platforms.items():
-            if platform in description:
-                found_platforms.append(indicator)
-        
-        # Bonus points for multiple social media links
-        if len(found_platforms) >= 3:
-            score_boost = 120
-            new_indicators.extend(found_platforms[:3])
-            new_indicators.append(f"Multiple social media links ({len(found_platforms)})")
-        elif len(found_platforms) >= 2:
-            score_boost = 80
-            new_indicators.extend(found_platforms[:2])
-        elif len(found_platforms) >= 1:
-            score_boost = 40
-            new_indicators.append(found_platforms[0])
-        
-        # Check for official website
-        if 'http://' in description or 'https://' in description:
-            website_indicators = ['.com', '.net', '.org', '.io']
-            if any(indicator in description for indicator in website_indicators):
-                score_boost += 30
-                new_indicators.append("Official website link")
-        
-        # Check for contact email (often in official channels)
-        if '@' in description and ('.com' in description or '.net' in description):
-            score_boost += 20
-            new_indicators.append("Contact email provided")
-        
-        if score_boost > 0:
-            channel['score'] += score_boost
-            channel['indicators'].extend(new_indicators)
-            verified_channels.append(channel)
-    
-    return verified_channels if verified_channels else channels
+    return None, "NOT_FOUND", search_queries
 
-# =============================================================================
-# LAYER 4: LLM INTELLIGENT VERIFICATION
-# =============================================================================
-
-def llm_channel_verification(artist_name: str, channels: List[Dict], llm: ChatOpenAI) -> List[Dict]:
-    """Layer 4: Use LLM for intelligent verification and ranking"""
+def should_include_video_llm(video_title: str, artist_name: str, llm: ChatOpenAI) -> bool:
+    """
+    Use LLM to determine if a video should be included as a music video.
+    This helps filter out interviews, behind-the-scenes, etc.
+    """
     
-    if not channels or len(channels) <= 1 or not llm:
-        return channels
+    prompt = PromptTemplate(
+        input_variables=["video_title", "artist_name"],
+        template="""Analyze this YouTube video:
+        
+        Title: "{video_title}"
+        Artist: "{artist_name}"
+        
+        Is this likely a MUSIC VIDEO (official music video, lyric video, audio, visualizer)?
+        
+        Exclude: interviews, behind-the-scenes, documentaries, live concerts, rehearsals, vlogs, tutorials
+        
+        Return EXACTLY:
+        MUSIC_VIDEO: [YES/NO]"""
+    )
+    
+    chain = LLMChain(llm=llm, prompt=prompt)
     
     try:
-        # Prepare channel information for LLM
-        channel_descriptions = []
-        for i, channel in enumerate(channels[:5]):  # Analyze top 5
-            indicators_str = ', '.join(channel['indicators'][:5])
-            desc = (
-                f"Channel {i+1}: '{channel['title']}'\n"
-                f"  • Subscribers: {channel['subscribers']:,}\n"
-                f"  • Videos: {channel['videos']}\n"
-                f"  • Verification indicators: {indicators_str}\n"
-                f"  • Description snippet: {channel['description'][:150]}..."
-            )
-            channel_descriptions.append(desc)
-        
-        prompt = PromptTemplate(
-            input_variables=["artist_name", "channels_info"],
-            template="""You are an expert music industry analyst verifying official artist YouTube channels.
-
-Artist: "{artist_name}"
-
-Potential YouTube Channels:
-{channels_info}
-
-Analyze these channels and determine which one is MOST LIKELY the OFFICIAL ARTIST CHANNEL.
-Consider: Name similarity, verification badges, subscriber count, content type, and official indicators.
-
-Return EXACTLY in this format:
-BEST_CHANNEL: [Channel Number 1/2/3/4/5]
-CONFIDENCE: [95-100% / 85-94% / 70-84% / Below 70%]
-REASON: [2-3 sentence explanation of your choice]
-
-Only choose ONE channel as the best."""
-        )
-        
-        chain = LLMChain(llm=llm, prompt=prompt)
-        
-        result = chain.run({
-            "artist_name": artist_name,
-            "channels_info": "\n\n".join(channel_descriptions)
-        })
-        
-        # Parse LLM result
-        selected_channel = None
-        confidence = "Medium"
-        
+        result = chain.run({"video_title": video_title, "artist_name": artist_name})
         for line in result.strip().split('\n'):
-            if line.startswith("BEST_CHANNEL:"):
-                try:
-                    channel_num = int(line.split(':')[1].strip().split()[0])
-                    if 1 <= channel_num <= min(5, len(channels)):
-                        selected_channel = channel_num - 1
-                except:
-                    pass
-            elif line.startswith("CONFIDENCE:"):
-                confidence = line.split(':')[1].strip()
-        
-        # Apply LLM verification bonus
-        if selected_channel is not None:
-            channels[selected_channel]['score'] += 200
-            channels[selected_channel]['indicators'].append(f"LLM verified ({confidence} confidence)")
-            
-            # Also boost channels with high name similarity
-            for i, channel in enumerate(channels):
-                if i != selected_channel:
-                    artist_clean = clean_string(artist_name)
-                    channel_clean = clean_string(channel['title'])
-                    similarity = SequenceMatcher(None, artist_clean, channel_clean).ratio()
-                    
-                    if similarity > 0.8:
-                        channel['score'] += 50
-                        channel['indicators'].append(f"High name similarity ({similarity:.0%})")
-        
-        return sorted(channels, key=lambda x: x['score'], reverse=True)
-        
-    except Exception as e:
-        return channels
+            if line.startswith("MUSIC_VIDEO:"):
+                answer = line.replace("MUSIC_VIDEO:", "").strip().upper()
+                return answer == "YES"
+        return True  # Default to including if unclear
+    except Exception:
+        return True
 
-# =============================================================================
-# MAIN 100% ACCURATE CHANNEL FINDING FUNCTION
-# =============================================================================
-
-def find_official_channel_100_percent(artist_name: str, youtube_api_key: str, llm: ChatOpenAI) -> Tuple[Optional[Dict], str, List[Dict]]:
+def discover_channel_videos(locked_channel: str, artist_name: str, llm: ChatOpenAI, min_videos: int = 30) -> List[Dict]:
     """
-    MAIN FUNCTION: 100% accurate official channel finding
-    Returns: (best_channel, confidence_level, all_candidates)
+    UNIVERSAL VERSION: Discover videos with LLM-based filtering
     """
     
-    # Initialize YouTube client
-    youtube = get_youtube_client(youtube_api_key)
-    if not youtube:
-        return None, "YOUTUBE_API_ERROR", []
+    if not locked_channel:
+        return []
     
-    with st.spinner("🔍 **Layer 1:** Searching YouTube API..."):
-        # Layer 1: YouTube Data API
-        youtube_candidates = get_channels_from_youtube_api(artist_name, youtube)
+    all_videos = []
     
-    if not youtube_candidates:
-        return None, "NO_CHANNELS_FOUND", []
+    search_attempts = [
+        f"{locked_channel} {artist_name}",
+        f"{locked_channel} official",
+        locked_channel
+    ]
     
-    with st.spinner("🔍 **Layer 2:** Wikipedia verification..."):
-        # Layer 2: Wikipedia/MusicBrainz verification
-        wiki_verified = cross_reference_with_wikidata(artist_name, youtube_candidates)
-    
-    with st.spinner("🔍 **Layer 3:** Social media verification..."):
-        # Layer 3: Social media verification
-        social_verified = verify_social_media_links(artist_name, wiki_verified)
-    
-    with st.spinner("🔍 **Layer 4:** AI intelligence verification..."):
-        # Layer 4: LLM intelligent verification
-        final_candidates = llm_channel_verification(artist_name, social_verified, llm)
-    
-    # Determine confidence level
-    if not final_candidates:
-        return None, "NO_CONFIDENT_MATCH", []
-    
-    best_channel = final_candidates[0]
-    score = best_channel['score']
-    
-    # Confidence calculation
-    if score >= 800:
-        confidence = "VERY_HIGH (99%)"
-    elif score >= 600:
-        confidence = "HIGH (95%)"
-    elif score >= 400:
-        confidence = "MEDIUM (85%)"
-    elif score >= 250:
-        confidence = "LOW (75%)"
-    else:
-        confidence = "UNCERTAIN (65%)"
-    
-    # Additional verification: Check if channel has music videos
-    with st.spinner("🔍 **Final verification:** Checking music content..."):
-        if best_channel.get('uploads_playlist_id'):
-            try:
-                # Get a few videos to verify music content
-                playlist_items = youtube.playlistItems().list(
-                    playlistId=best_channel['uploads_playlist_id'],
-                    part="snippet",
-                    maxResults=10
-                ).execute()
-                
-                music_keywords = ['official', 'music', 'video', 'audio', 'song', 'single', 'album', 'mv']
-                music_count = 0
-                
-                for item in playlist_items.get('items', []):
-                    title = item['snippet']['title'].lower()
-                    if any(keyword in title for keyword in music_keywords):
-                        music_count += 1
-                
-                if music_count >= 5:
-                    best_channel['score'] += 100
-                    best_channel['indicators'].append(f"Strong music content ({music_count}/10 videos)")
-                    confidence = f"{confidence}+MUSIC_VERIFIED"
-                elif music_count >= 2:
-                    best_channel['score'] += 50
-                    best_channel['indicators'].append(f"Some music content ({music_count}/10 videos)")
-            except:
-                pass
-    
-    return best_channel, confidence, final_candidates[:5]  # Return top 5 candidates for transparency
-
-# =============================================================================
-# GUARANTEED 3 VIDEOS SYSTEM
-# =============================================================================
-
-def guarantee_three_videos(artist_name: str, channel_data: Dict, youtube) -> List[Dict]:
-    """
-    GUARANTEE 3 distinct music videos using multiple strategies
-    """
-    
-    videos = []
-    
-    # STRATEGY 1: Get videos from official channel
-    if channel_data and youtube and channel_data.get('uploads_playlist_id'):
+    for search_query in search_attempts:
         try:
-            playlist_items = youtube.playlistItems().list(
-                playlistId=channel_data['uploads_playlist_id'],
-                part="snippet",
-                maxResults=50
-            ).execute()
+            results = YoutubeSearch(search_query, max_results=40).to_dict()
             
-            video_ids = [item['snippet']['resourceId']['videoId'] for item in playlist_items.get('items', [])]
-            
-            if video_ids:
-                # Get video details
-                videos_response = youtube.videos().list(
-                    id=','.join(video_ids[:30]),  # Get first 30
-                    part="snippet,contentDetails,statistics"
-                ).execute()
-                
-                for video in videos_response.get('items', []):
-                    # Score video for music likelihood
-                    score = score_video_for_music(video, artist_name)
-                    
-                    if score >= 50:
-                        videos.append({
-                            'id': video['id'],
-                            'url': f"https://www.youtube.com/watch?v={video['id']}",
-                            'title': video['snippet']['title'],
-                            'channel': video['snippet']['channelTitle'],
-                            'duration': video['contentDetails']['duration'],
-                            'views': int(video['statistics'].get('viewCount', 0)),
-                            'likes': int(video['statistics'].get('likeCount', 0)),
-                            'score': score,
-                            'thumbnail': video['snippet']['thumbnails']['high']['url'],
-                            'published': video['snippet']['publishedAt']
-                        })
-                    
-                    if len(videos) >= 15:  # Get enough to select distinct ones
-                        break
-        except Exception as e:
-            st.warning(f"Could not get channel videos: {e}")
-    
-    # STRATEGY 2: Search for artist music videos
-    if len(videos) < 10 and youtube:
-        try:
-            search_response = youtube.search().list(
-                q=f"{artist_name} official music video",
-                part="snippet",
-                type="video",
-                maxResults=30,
-                videoDuration="medium",  # 4-20 minutes
-                order="relevance"
-            ).execute()
-            
-            for item in search_response.get('items', []):
-                if len(videos) >= 15:
-                    break
-                
-                video_id = item['id']['videoId']
-                
-                # Skip if already in list
-                if any(v['id'] == video_id for v in videos):
+            for result in results:
+                # Only from our channel
+                if result['channel'].strip() != locked_channel:
                     continue
                 
-                # Get video details
-                video_response = youtube.videos().list(
-                    id=video_id,
-                    part="snippet,contentDetails,statistics"
-                ).execute()
+                # Use LLM to check if this is a music video
+                if not should_include_video_llm(result['title'], artist_name, llm):
+                    continue
                 
-                if video_response.get('items'):
-                    video_data = video_response['items'][0]
-                    score = score_video_for_music(video_data, artist_name)
-                    
-                    if score >= 40:
-                        videos.append({
-                            'id': video_id,
-                            'url': f"https://www.youtube.com/watch?v={video_id}",
-                            'title': video_data['snippet']['title'],
-                            'channel': video_data['snippet']['channelTitle'],
-                            'duration': video_data['contentDetails']['duration'],
-                            'views': int(video_data['statistics'].get('viewCount', 0)),
-                            'likes': int(video_data['statistics'].get('likeCount', 0)),
-                            'score': score,
-                            'thumbnail': video_data['snippet']['thumbnails']['high']['url'],
-                            'published': video_data['snippet']['publishedAt']
-                        })
-        except Exception as e:
-            st.warning(f"Search fallback failed: {e}")
+                score = score_video_music_likelihood(result, artist_name)
+                
+                if score >= 30:
+                    all_videos.append({
+                        'url': f"https://www.youtube.com/watch?v={result['id']}",
+                        'title': result['title'],
+                        'channel': result['channel'],
+                        'duration': result.get('duration', ''),
+                        'views': result.get('views', ''),
+                        'score': score,
+                        'found_via': search_query
+                    })
+            
+            if len(all_videos) >= min_videos:
+                break
+                
+        except Exception:
+            continue
     
-    # Remove duplicates and sort by score
+    # Remove duplicates
     unique_videos = {}
-    for video in videos:
-        if video['id'] not in unique_videos:
-            unique_videos[video['id']] = video
+    for video in all_videos:
+        video_id = video['url'].split('v=')[1].split('&')[0]
+        if video_id not in unique_videos:
+            unique_videos[video_id] = video
     
-    video_list = list(unique_videos.values())
-    video_list.sort(key=lambda x: x['score'], reverse=True)
-    
-    # STRATEGY 3: Use LLM to ensure distinct songs
-    if video_list and len(video_list) >= 3:
-        distinct_videos = select_distinct_songs(video_list, 3)
-        return distinct_videos[:3]
-    
-    # STRATEGY 4: Ultimate fallback - search links
-    if len(video_list) < 3:
-        fallback_links = generate_fallback_links(artist_name)
-        return fallback_links[:3]
-    
-    return video_list[:3]
+    return sorted(unique_videos.values(), key=lambda x: x['score'], reverse=True)
 
-def score_video_for_music(video_data: Dict, artist_name: str) -> int:
-    """Score video for music likelihood"""
-    
+def score_video_music_likelihood(video: Dict, artist_name: str) -> int:
+    """Score video based on music video characteristics."""
     score = 0
-    title = video_data['snippet']['title'].lower()
+    title = video['title']
     
-    # 1. Official indicators (highest priority)
-    if 'official' in title:
-        if 'music video' in title or 'mv' in title:
-            score += 100
-        elif 'video' in title or 'audio' in title:
-            score += 80
-        else:
-            score += 60
+    # 1. DURATION
+    if video.get('duration'):
+        duration = video['duration']
+        try:
+            parts = duration.split(':')
+            if len(parts) == 2:
+                minutes, seconds = int(parts[0]), int(parts[1])
+                total_seconds = minutes * 60 + seconds
+                
+                if 120 <= total_seconds <= 600:
+                    score += 60
+                elif 90 <= total_seconds <= 720:
+                    score += 40
+                elif 30 <= total_seconds <= 1200:
+                    score += 20
+                    
+            elif len(parts) == 1:
+                if int(parts[0]) > 180:
+                    score += 30
+        except:
+            pass
     
-    # 2. Duration check
-    duration = video_data['contentDetails']['duration']
-    try:
-        duration_sec = isodate.parse_duration(duration).total_seconds()
-        if 120 <= duration_sec <= 600:  # 2-10 minutes
-            score += 70
-        elif 90 <= duration_sec <= 720:  # 1.5-12 minutes
-            score += 50
-    except:
-        pass
+    # 2. TITLE PATTERNS
+    title_lower = title.lower()
     
-    # 3. View count
-    views = int(video_data['statistics'].get('viewCount', 0))
-    if views > 1000000:
-        score += 60
-    elif views > 100000:
-        score += 40
-    elif views > 10000:
-        score += 20
+    structural_patterns = [
+        r'[\[\(][^\]\)]+[\]\)]',
+        r'\d{4}',
+        r'[A-Z]{2,}',
+        r'[|•\-–—]',
+    ]
     
-    # 4. Music indicators
-    music_indicators = ['music video', 'mv', 'lyric video', 'audio visualizer', 'song', 'single']
-    for indicator in music_indicators:
-        if indicator in title:
-            score += 40
+    for pattern in structural_patterns:
+        if re.search(pattern, title):
+            score += 10
             break
     
-    # 5. Artist name in title
-    artist_words = set(clean_string(artist_name).split())
-    title_words = set(clean_string(title).split())
-    common_words = artist_words.intersection(title_words)
+    # 3. TITLE LENGTH
+    title_length = len(title)
+    if 20 <= title_length <= 80:
+        score += 15
+    elif 10 <= title_length <= 120:
+        score += 10
     
-    if common_words:
-        score += len(common_words) * 15
+    # 4. VIEW POPULARITY
+    if video.get('views'):
+        views_text = video['views'].lower()
+        if 'm' in views_text:
+            score += 25
+        elif 'k' in views_text:
+            score += 15
+        elif 'views' in views_text:
+            score += 10
     
-    # 6. Recent content (within 2 years)
-    try:
-        from datetime import datetime, timezone
-        published = datetime.fromisoformat(video_data['snippet']['publishedAt'].replace('Z', '+00:00'))
-        age_days = (datetime.now(timezone.utc) - published).days
-        if age_days < 365 * 2:
-            score += 30
-    except:
-        pass
+    # 5. FORMAT HINTS
+    format_indicators = [
+        '4k', 'hd', '1080p', 'official audio', 'visualizer',
+        'lyric video', 'lyrics', 'audio only'
+    ]
     
-    # 7. Like ratio (if available)
-    likes = int(video_data['statistics'].get('likeCount', 0))
-    if views > 0 and likes > 0:
-        like_ratio = likes / views
-        if like_ratio > 0.05:  # 5% like ratio
-            score += 30
+    for indicator in format_indicators:
+        if indicator in title_lower:
+            score += 5
     
     return max(0, score)
 
-def select_distinct_songs(videos: List[Dict], count: int) -> List[Dict]:
-    """Select distinct songs using title similarity"""
-    
-    if len(videos) <= count:
-        return videos
-    
-    selected = []
-    used_titles = set()
-    
-    for video in videos:
-        if len(selected) >= count:
-            break
-        
-        title_lower = video['title'].lower()
-        
-        # Check if this is similar to already selected videos
-        is_similar = False
-        for used_title in used_titles:
-            similarity = SequenceMatcher(None, title_lower, used_title).ratio()
-            if similarity > 0.7:  # 70% similar
-                is_similar = True
-                break
-        
-        if not is_similar:
-            selected.append(video)
-            used_titles.add(title_lower)
-    
-    # If we don't have enough distinct videos, add the highest scoring ones
-    if len(selected) < count:
-        for video in videos:
-            if len(selected) >= count:
-                break
-            if video not in selected:
-                selected.append(video)
-    
-    return selected[:count]
-
-def generate_fallback_links(artist_name: str) -> List[Dict]:
-    """Generate fallback search links"""
-    
-    search_queries = [
-        f"{artist_name} official music video",
-        f"{artist_name} new song",
-        f"{artist_name} popular songs"
-    ]
-    
-    fallback_videos = []
-    
-    for i, query in enumerate(search_queries):
-        fallback_videos.append({
-            'id': f"search_{i}",
-            'url': f"https://www.youtube.com/results?search_query={query.replace(' ', '+')}",
-            'title': f"{artist_name} - {query.replace(artist_name, '').strip()}",
-            'channel': "YouTube Search",
-            'duration': "Various",
-            'views': "Search results",
-            'score': 50,
-            'is_fallback': True,
-            'thumbnail': "https://img.youtube.com/vi/dummy/hqdefault.jpg"
-        })
-    
-    return fallback_videos
-
 # =============================================================================
-# ARTIST & GENRE HANDLING (UNCHANGED FROM YOUR CODE)
+# ARTIST & GENRE HANDLING
 # =============================================================================
 
 def analyze_genre_popularity(genre: str, llm: ChatOpenAI, search_attempts: int) -> Dict:
@@ -1028,7 +654,7 @@ def handle_niche_genre_fallback(genre: str, llm: ChatOpenAI, attempts: int) -> D
         }
 
 # =============================================================================
-# STREAMLIT APP (YOUR ORIGINAL UI - UNCHANGED)
+# STREAMLIT APP
 # =============================================================================
 
 def main():
@@ -1041,8 +667,8 @@ def main():
     # Initialize session state
     if 'sessions' not in st.session_state:
         st.session_state.sessions = []
-    if 'api_keys' not in st.session_state:
-        st.session_state.api_keys = {"youtube": "", "deepseek": ""}
+    if 'api_key' not in st.session_state:
+        st.session_state.api_key = ""
     if 'excluded_artists' not in st.session_state:
         st.session_state.excluded_artists = []
     if 'genre_attempts' not in st.session_state:
@@ -1050,7 +676,7 @@ def main():
     if 'genre_popularity' not in st.session_state:
         st.session_state.genre_popularity = {}
     
-    # Custom CSS (your original CSS - UNCHANGED)
+    # Custom CSS
     st.markdown("""
     <style>
     .universal-badge {
@@ -1062,25 +688,6 @@ def main():
         display: inline-block;
         margin: 5px;
     }
-    
-    .video-success {
-        background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
-        padding: 15px;
-        border-radius: 10px;
-        border: 1px solid #dee2e6;
-        margin-bottom: 15px;
-    }
-    
-    .oac-badge {
-        background: linear-gradient(135deg, #4CAF50 0%, #45a049 100%);
-        color: white;
-        padding: 4px 12px;
-        border-radius: 20px;
-        font-size: 0.9em;
-        display: inline-block;
-        margin: 5px;
-    }
-    
     .artist-match-high {
         background: linear-gradient(135deg, #4CAF50 0%, #8BC34A 100%);
         color: white;
@@ -1090,7 +697,6 @@ def main():
         display: inline-block;
         margin: 2px;
     }
-    
     .artist-match-medium {
         background: linear-gradient(135deg, #FF9800 0%, #FFC107 100%);
         color: white;
@@ -1100,7 +706,6 @@ def main():
         display: inline-block;
         margin: 2px;
     }
-    
     .ai-badge {
         background: linear-gradient(135deg, #9C27B0 0%, #673AB7 100%);
         color: white;
@@ -1110,59 +715,25 @@ def main():
         display: inline-block;
         margin: 2px;
     }
-    
-    .guarantee-badge {
-        background: linear-gradient(135deg, #FF5722 0%, #FF9800 100%);
-        color: white;
-        padding: 6px 16px;
-        border-radius: 20px;
-        font-size: 1em;
-        font-weight: bold;
-        display: inline-block;
-        margin: 10px 0;
-        border: 2px solid #FF5722;
-    }
-    
-    .verification-badge {
-        background: linear-gradient(135deg, #2196F3 0%, #21CBF3 100%);
-        color: white;
-        padding: 4px 12px;
-        border-radius: 20px;
-        font-size: 0.9em;
-        display: inline-block;
-        margin: 5px;
-    }
     </style>
     """, unsafe_allow_html=True)
     
-    # Header (your original header)
+    # Header
     st.title("🔊 I AM MUSIC")
-    st.markdown('<div class="guarantee-badge">🎯 100% ACCURATE CHANNEL LOCKING + GUARANTEED 3 VIDEOS</div>', unsafe_allow_html=True)
+    st.caption("🤖 Universal AI-Powered Music Discovery - Works with any language and genre!")
     
-    # Sidebar (your original sidebar with added YouTube API key)
+    # Sidebar
     with st.sidebar:
         st.header("⚙️ Configuration")
-        
-        # YouTube API Key (REQUIRED for 100% accuracy)
-        youtube_api_key = st.text_input(
-            "YouTube Data API Key (Required):",
-            type="password",
-            value=st.session_state.api_keys.get("youtube", ""),
-            placeholder="AIzaSy... (Get from Google Cloud Console)"
-        )
-        
-        # DeepSeek API Key
-        deepseek_api_key = st.text_input(
+        api_key = st.text_input(
             "DeepSeek API Key:",
             type="password",
-            value=st.session_state.api_keys.get("deepseek", ""),
+            value=st.session_state.api_key,
             placeholder="sk-..."
         )
         
-        if youtube_api_key:
-            st.session_state.api_keys["youtube"] = youtube_api_key
-        if deepseek_api_key:
-            st.session_state.api_keys["deepseek"] = deepseek_api_key
+        if api_key:
+            st.session_state.api_key = api_key
         
         st.markdown("---")
         
@@ -1181,10 +752,9 @@ def main():
             st.session_state.excluded_artists = []
             st.session_state.genre_attempts = {}
             st.session_state.genre_popularity = {}
-            st.session_state.api_keys = {"youtube": "", "deepseek": ""}
             st.rerun()
     
-    # Main input (your original UI)
+    # Main input
     st.markdown("### Enter Any Music Genre")
     
     col1, col2, col3 = st.columns([2,1,1])
@@ -1193,7 +763,7 @@ def main():
         with st.form(key="search_form"):
             genre_input = st.text_input(
                 "Genre name:",
-                placeholder="e.g., K-pop, Reggaeton, Synthwave, Tamil Pop...",
+                placeholder="e.g., Tamil Pop, K-pop, Reggaeton, Synthwave...",
                 label_visibility="collapsed",
                 key="genre_input"
             )
@@ -1202,20 +772,12 @@ def main():
     
     # Process search
     if submitted and genre_input:
-        # Check for API keys
-        if not st.session_state.api_keys["youtube"]:
-            st.error("⚠️ **REQUIRED:** Please enter your YouTube Data API key!")
-            st.info("Get a free API key from: https://console.cloud.google.com/ → Enable YouTube Data API v3")
-            return
-        if not st.session_state.api_keys["deepseek"]:
+        if not st.session_state.api_key:
             st.error("Please enter your DeepSeek API key!")
             return
         
-        # Initialize APIs
-        youtube = get_youtube_client(st.session_state.api_keys["youtube"])
-        llm = initialize_llm(st.session_state.api_keys["deepseek"])
-        
-        if not youtube or not llm:
+        llm = initialize_llm(st.session_state.api_key)
+        if not llm:
             return
         
         # Track genre attempts
@@ -1288,138 +850,102 @@ def main():
         st.success(f"🎤 **Artist Found:** {artist_name}")
         st.caption(f"Confidence: {artist_result.get('confidence', 'Medium')} | Note: {artist_result.get('note', '')}")
         
-        # Step 2: 100% ACCURATE CHANNEL LOCKING
+        # Step 2: Find and lock official channel
         st.markdown("---")
-        st.markdown("### 🔍 100% Accurate Channel Verification")
+        st.markdown("### 🔍 Finding Official Channel")
+        st.markdown('<span class="ai-badge">🤖 Using AI to identify official artist channel</span>', unsafe_allow_html=True)
         
-        # Create progress containers
-        progress_container = st.container()
-        details_container = st.container()
+        with st.spinner("AI is analyzing channels to find the official artist channel..."):
+            locked_channel, channel_status, search_queries = find_and_lock_official_channel(
+                artist_name, genre_input, llm
+            )
         
-        with progress_container:
-            with st.spinner("Starting 4-layer verification..."):
-                # Run the 100% accurate channel finding
-                channel_data, confidence, all_candidates = find_official_channel_100_percent(
-                    artist_name, 
-                    st.session_state.api_keys["youtube"], 
-                    llm
-                )
-        
-        if channel_data and confidence != "NO_CONFIDENT_MATCH":
-            st.success(f"✅ **OFFICIAL CHANNEL VERIFIED:** {channel_data['title']}")
-            st.markdown(f'<span class="verification-badge">🎯 Confidence: {confidence}</span>', unsafe_allow_html=True)
+        if channel_status == "FOUND" and locked_channel:
+            st.success(f"✅ **Artist Channel Locked:** {locked_channel}")
+            st.markdown('<span class="ai-badge">🤖 Verified by AI as official artist channel</span>', unsafe_allow_html=True)
             
-            # Show verification details
-            with details_container.expander("🔍 **Verification Details**"):
-                st.write(f"**Channel:** {channel_data['title']}")
-                st.write(f"**Subscribers:** {channel_data['subscribers']:,}")
-                st.write(f"**Videos:** {channel_data['videos']}")
-                st.write(f"**Verification Score:** {channel_data['score']}/1000")
-                st.write(f"**YouTube Verified:** {'✅ Yes' if channel_data.get('verified') else '❌ No'}")
+            # Step 3: Discover videos
+            with st.spinner(f"Exploring {locked_channel} for music videos..."):
+                available_videos = discover_channel_videos(locked_channel, artist_name, llm)
+            
+            if not available_videos:
+                st.error(f"❌ No music videos found in {locked_channel}")
+                st.info(f"Channel might not have public music videos.")
                 
-                if channel_data.get('custom_url'):
-                    st.write(f"**Custom URL:** {channel_data['custom_url']}")
-                
-                st.write("**Verification Indicators:**")
-                for indicator in channel_data['indicators'][:8]:  # Show top 8
-                    st.write(f"• {indicator}")
+                session_data = {
+                    "genre": genre_input,
+                    "artist": artist_name,
+                    "locked_channel": locked_channel,
+                    "status": "NO_VIDEOS_IN_CHANNEL",
+                    "attempt": current_attempt,
+                    "timestamp": time.time()
+                }
+                st.session_state.sessions.append(session_data)
+                return
             
-            # Step 3: GUARANTEED 3 VIDEOS
-            st.markdown("---")
-            st.markdown("### 🎵 Discovering Music Videos")
+            # Select best 3 music videos
+            with st.spinner(f"🤖 Using AI to select 3 different songs..."):
+                selected_videos = select_best_music_videos(available_videos, 3, llm)
             
-            with st.spinner(f"🔍 **GUARANTEE:** Finding 3 distinct music videos..."):
-                selected_videos = guarantee_three_videos(artist_name, channel_data, youtube)
+            if len(selected_videos) < 3:
+                st.warning(f"⚠️ Only found {len(selected_videos)} suitable music videos")
             
             # Display results
             st.markdown("---")
-            st.markdown(f"### 🎬 {artist_name} - Official Music Videos")
+            st.markdown(f"### 🎵 {artist_name} Music Videos from {locked_channel}")
             
-            st.success(f"✅ **SUCCESS:** Found {len(selected_videos)} music videos")
+            st.success(f"✅ **AI-Selected {len(selected_videos)} Distinct Songs**")
             
-            # Display 3 videos in columns
-            if len(selected_videos) >= 3:
-                cols = st.columns(3)
-                
-                for idx, video in enumerate(selected_videos[:3]):
-                    with cols[idx]:
-                        st.markdown(f'<div class="video-success">', unsafe_allow_html=True)
-                        
-                        # Display fallback notice if needed
-                        if video.get('is_fallback'):
-                            st.warning("⚠️ Search Link")
-                        
-                        st.markdown(f"**Song {idx+1}**")
-                        
-                        # Display thumbnail
-                        try:
-                            st.image(video['thumbnail'], use_column_width=True)
-                        except:
-                            st.image("https://img.youtube.com/vi/dummy/hqdefault.jpg", use_column_width=True)
-                        
-                        # Title and info
-                        display_title = video['title']
-                        if len(display_title) > 50:
-                            display_title = display_title[:47] + "..."
-                        
-                        st.write(f"**{display_title}**")
-                        
-                        # Video info
-                        col_info1, col_info2 = st.columns(2)
-                        with col_info1:
-                            if video.get('duration') and not video.get('is_fallback'):
-                                try:
-                                    duration_sec = isodate.parse_duration(video['duration']).total_seconds()
-                                    minutes = int(duration_sec // 60)
-                                    seconds = int(duration_sec % 60)
-                                    st.caption(f"⏱️ {minutes}:{seconds:02d}")
-                                except:
-                                    st.caption(f"⏱️ {video['duration']}")
-                            elif 'duration' in video:
-                                st.caption(f"⏱️ {video['duration']}")
-                        with col_info2:
-                            if video.get('views'):
-                                if isinstance(video['views'], int):
-                                    if video['views'] > 1000000:
-                                        st.caption(f"👁️ {video['views']//1000000}M views")
-                                    elif video['views'] > 1000:
-                                        st.caption(f"👁️ {video['views']//1000}K views")
-                                    else:
-                                        st.caption(f"👁️ {video['views']} views")
-                                else:
-                                    st.caption(f"👁️ {video['views']}")
-                        
-                        # Quality score
-                        if video.get('score') and not video.get('is_fallback'):
-                            score = video['score']
-                            if score >= 70:
-                                st.markdown(f'<span class="artist-match-high">Quality: {score}/100</span>', unsafe_allow_html=True)
-                            elif score >= 40:
-                                st.markdown(f'<span class="artist-match-medium">Quality: {score}/100</span>', unsafe_allow_html=True)
-                        
-                        # Watch button
-                        button_text = "🔍 Search on YouTube" if video.get('is_fallback') else "▶ Watch on YouTube"
-                        button_color = "#4285F4" if video.get('is_fallback') else "#FF0000"
-                        st.markdown(
-                            f'<a href="{video["url"]}" target="_blank">'
-                            f'<button style="background-color: {button_color}; color: white; '
-                            f'border: none; padding: 8px 16px; border-radius: 4px; '
-                            f'cursor: pointer; width: 100%; margin-top: 10px;">{button_text}</button></a>',
-                            unsafe_allow_html=True
-                        )
-                        
-                        st.markdown("</div>", unsafe_allow_html=True)
+            videos_found = 0
+            cols = st.columns(3)
+            
+            for idx, video in enumerate(selected_videos):
+                with cols[idx % 3]:
+                    st.markdown(f"**Song {idx+1}**")
+                    
+                    # Display video
+                    try:
+                        st.video(video['url'])
+                    except Exception:
+                        video_id = video['url'].split('v=')[1].split('&')[0]
+                        st.image(f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg")
+                    
+                    # Title and info
+                    display_title = video['title']
+                    if len(display_title) > 40:
+                        display_title = display_title[:37] + "..."
+                    
+                    st.write(f"**{display_title}**")
+                    
+                    if video.get('duration'):
+                        st.caption(f"Duration: {video['duration']}")
+                    
+                    if video.get('score'):
+                        score = video['score']
+                        if score >= 70:
+                            st.markdown(f'<span class="artist-match-high">Match: {score}/100</span>', unsafe_allow_html=True)
+                        elif score >= 40:
+                            st.markdown(f'<span class="artist-match-medium">Match: {score}/100</span>', unsafe_allow_html=True)
+                    
+                    # Watch button
+                    st.markdown(
+                        f'<a href="{video["url"]}" target="_blank">'
+                        '<button style="background-color: #FF0000; color: white; '
+                        'border: none; padding: 8px 16px; border-radius: 4px; '
+                        'cursor: pointer; width: 100%;">▶ Watch on YouTube</button></a>',
+                        unsafe_allow_html=True
+                    )
+                    
+                    videos_found += 1
             
             # Store session
             session_data = {
                 "genre": genre_input,
                 "artist": artist_name,
-                "channel": channel_data['title'],
-                "channel_id": channel_data['id'],
-                "confidence": confidence,
+                "locked_channel": locked_channel,
                 "status": "COMPLETE",
-                "videos_found": len(selected_videos),
-                "total_videos": 3,
+                "videos_found": videos_found,
+                "total_videos": len(selected_videos),
                 "attempt": current_attempt,
                 "timestamp": time.time()
             }
@@ -1428,52 +954,20 @@ def main():
             
             # Summary
             st.markdown("---")
-            st.success(f"🎉 **COMPLETE:** 100% accurate channel verification + 3 guaranteed videos for {artist_name}")
-            
-            if any(v.get('is_fallback') for v in selected_videos):
-                st.info("ℹ️ Some search links were provided when direct videos couldn't be found.")
+            if videos_found == 3:
+                st.success(f"🎉 **Perfect! Found 3 AI-selected songs from {locked_channel}**")
+            else:
+                st.warning(f"⚠️ Found {videos_found}/3 videos in the channel")
         
         else:
-            # No channel found or low confidence
-            st.error(f"❌ Could not verify official channel for {artist_name}")
+            # No channel found
+            st.error(f"❌ Could not find official channel for {artist_name}")
+            st.info(f"Try searching '{artist_name}' directly on YouTube.")
             
-            if all_candidates:
-                st.info(f"Found {len(all_candidates)} potential channels but none met high confidence threshold.")
-                with st.expander("See potential channels"):
-                    for i, candidate in enumerate(all_candidates[:3]):
-                        st.write(f"**{i+1}. {candidate['title']}** (Score: {candidate['score']})")
-            
-            # Try to get videos anyway (fallback mode)
-            with st.spinner("Trying fallback mode: Finding videos without channel lock..."):
-                fallback_videos = guarantee_three_videos(artist_name, None, youtube)
-            
-            if fallback_videos:
-                st.warning(f"⚠️ Found {len(fallback_videos)} videos in fallback mode")
-                
-                # Display fallback videos
-                cols = st.columns(3)
-                for idx, video in enumerate(fallback_videos[:3]):
-                    with cols[idx]:
-                        st.markdown(f'<div class="video-success">', unsafe_allow_html=True)
-                        st.markdown(f"**Song {idx+1}**")
-                        
-                        # Watch button
-                        st.markdown(
-                            f'<a href="{video["url"]}" target="_blank">'
-                            f'<button style="background-color: #4285F4; color: white; '
-                            f'border: none; padding: 8px 16px; border-radius: 4px; '
-                            f'cursor: pointer; width: 100%;">🔍 Search on YouTube</button></a>',
-                            unsafe_allow_html=True
-                        )
-                        
-                        st.markdown("</div>", unsafe_allow_html=True)
-            
-            # Store session
             session_data = {
                 "genre": genre_input,
                 "artist": artist_name,
-                "status": "NO_CONFIDENT_CHANNEL",
-                "videos_provided": len(fallback_videos) if 'fallback_videos' in locals() else 0,
+                "status": "NO_CHANNEL",
                 "attempt": current_attempt,
                 "timestamp": time.time()
             }
