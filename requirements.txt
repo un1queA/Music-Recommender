@@ -4,8 +4,10 @@ langchain-openai==0.1.7
 langchain-core==0.1.52
 youtube-search
 google-api-python-client
+wikipedia-api
+requests
 isodate
-httpx
+
 
 
 
