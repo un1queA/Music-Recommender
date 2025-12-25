@@ -50,25 +50,30 @@ def are_songs_different_llm(title1: str, title2: str, llm: ChatOpenAI) -> bool:
         return base1 != base2
 
 def select_best_music_videos(videos: List[Dict], count: int, llm: ChatOpenAI) -> List[Dict]:
-    """Select unique songs, ensuring no duplicates or covers."""
+    """Select unique songs - MUST find exactly 'count' unique songs."""
     
     if not videos or not llm:
         return videos[:count] if videos else []
     
+    if len(videos) < count:
+        return videos  # Return what we have
+    
     sorted_videos = sorted(videos, key=lambda x: x.get('score', 0), reverse=True)
     selected = []
     
+    # First pass: strict filtering
     for video in sorted_videos:
         if len(selected) >= count:
             break
         
-        # Skip covers, dance practices, etc.
+        # Skip obvious non-music
         title_lower = video['title'].lower()
-        if any(word in title_lower for word in ['cover', 'dance practice', 'choreography', 'reaction', 'compilation']):
+        if any(word in title_lower for word in ['cover', 'dance practice', 'choreography', 'reaction', 'compilation', 'behind']):
             continue
         
         is_unique = True
         if selected:
+            # Check against already selected songs
             for sel in selected:
                 if not are_songs_different_llm(video['title'], sel['title'], llm):
                     is_unique = False
@@ -76,6 +81,26 @@ def select_best_music_videos(videos: List[Dict], count: int, llm: ChatOpenAI) ->
         
         if is_unique:
             selected.append(video)
+    
+    # If we still don't have enough, be less strict
+    if len(selected) < count:
+        for video in sorted_videos:
+            if len(selected) >= count:
+                break
+            
+            # Already selected?
+            if video in selected:
+                continue
+            
+            # Check if truly different
+            is_unique = True
+            for sel in selected:
+                if not are_songs_different_llm(video['title'], sel['title'], llm):
+                    is_unique = False
+                    break
+            
+            if is_unique:
+                selected.append(video)
     
     return selected[:count]
 
@@ -347,37 +372,40 @@ Return ONLY: YES or NO"""
         return not any(kw in title_lower for kw in exclude)
 
 def discover_channel_videos(locked_channel: str, artist_name: str, llm: ChatOpenAI) -> List[Dict]:
-    """Discover official music videos from the locked channel."""
+    """Discover official music videos from the locked channel - AGGRESSIVE MODE."""
     
     if not locked_channel:
         return []
     
     all_videos = []
     
-    # Search specifically in the locked channel
+    # More search attempts to find videos
     search_attempts = [
         f'"{locked_channel}"',
-        f"{locked_channel} official video",
-        f"{artist_name} {locked_channel}"
+        f"{locked_channel} official",
+        f"{artist_name} {locked_channel}",
+        f"{locked_channel} music video",
+        f"{locked_channel} mv"
     ]
     
     for search_query in search_attempts:
         try:
-            results = YoutubeSearch(search_query, max_results=40).to_dict()
+            results = YoutubeSearch(search_query, max_results=50).to_dict()
             
             for result in results:
                 # STRICT: Only from locked channel
                 if result['channel'].strip() != locked_channel:
                     continue
                 
-                # Quick filter
+                # Quick filter - only exclude obvious non-music
                 title_lower = result['title'].lower()
-                if any(word in title_lower for word in ['cover', 'dance practice', 'choreography', 'behind', 'reaction']):
+                if any(word in title_lower for word in ['cover', 'dance practice', 'choreography', 'behind the scenes', 'reaction', 'interview']):
                     continue
                 
                 score = score_video_music_likelihood(result, artist_name)
                 
-                if score >= 40:
+                # Lower threshold to get more candidates
+                if score >= 30:
                     all_videos.append({
                         'url': f"https://www.youtube.com/watch?v={result['id']}",
                         'title': result['title'],
@@ -387,7 +415,8 @@ def discover_channel_videos(locked_channel: str, artist_name: str, llm: ChatOpen
                         'score': score
                     })
             
-            if len(all_videos) >= 25:
+            # Keep searching if we don't have enough
+            if len(all_videos) >= 40:
                 break
                 
         except Exception:
@@ -402,13 +431,14 @@ def discover_channel_videos(locked_channel: str, artist_name: str, llm: ChatOpen
     
     all_videos = list(unique_videos.values())
     
-    # LLM filter for quality
+    # LLM filter for quality - check more videos
     filtered = []
-    for video in sorted(all_videos, key=lambda x: x['score'], reverse=True)[:20]:
+    for video in sorted(all_videos, key=lambda x: x['score'], reverse=True)[:30]:
         if is_official_music_video_llm(video['title'], artist_name, llm):
             filtered.append(video)
         
-        if len(filtered) >= 15:
+        # Stop once we have enough good candidates
+        if len(filtered) >= 20:
             break
     
     return sorted(filtered, key=lambda x: x['score'], reverse=True)
@@ -613,7 +643,7 @@ def main():
         
         submitted = st.form_submit_button("🔍 Search", use_container_width=True, type="primary")
     
-    # Process search
+    # Process search with RETRY LOGIC
     if submitted and genre_input:
         if not st.session_state.api_key:
             st.error("⚠️ Please enter your DeepSeek API key!")
@@ -636,109 +666,141 @@ def main():
         st.session_state.genre_stats[genre_key] += 1
         st.session_state.total_sessions += 1
         
-        # Analyze genre
+        # Analyze genre once
         with st.spinner("Analyzing genre..."):
             genre_analysis = analyze_genre_popularity(genre_input, llm)
         
-        # Find artist
-        with st.spinner(f"Finding {genre_input} artist..."):
+        # RETRY LOOP: Try up to 5 different artists until we get 3 songs
+        MAX_ATTEMPTS = 5
+        success = False
+        
+        status_placeholder = st.empty()
+        
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            status_placeholder.info(f"🔄 Attempt {attempt}/{MAX_ATTEMPTS}: Finding artist with 3 available songs...")
+            
+            # Find artist
             artist_result = discover_artist_with_rotation(
                 genre_input,
                 llm,
                 excluded_for_this_genre
             )
-        
-        if artist_result["status"] != "ARTIST_FOUND":
-            st.error("❌ Could not find artist")
-            return
-        
-        artist_name = artist_result["artist"]
-        
-        # Check if already suggested for THIS genre
-        if artist_name in excluded_for_this_genre:
-            st.warning(f"⚠️ {artist_name} already suggested for {genre_input}! Try again.")
-            return
-        
-        # Add to excluded for this genre
-        st.session_state.excluded_by_genre[genre_key].append(artist_name)
-        
-        st.markdown('<div class="success-box">🎤 <strong>Artist Found:</strong> ' + artist_name + '</div>', unsafe_allow_html=True)
-        st.caption(f"Confidence: {artist_result.get('confidence', 'Medium')}")
-        
-        # Find channel with strict validation
-        st.markdown("---")
-        st.markdown("### 🔍 Finding Official Channel")
-        st.info("🔒 Validating that channel belongs to " + artist_name)
-        
-        with st.spinner("Finding and validating official channel..."):
-            locked_channel, status, _ = find_and_lock_official_channel(
+            
+            if artist_result["status"] != "ARTIST_FOUND":
+                if attempt == MAX_ATTEMPTS:
+                    status_placeholder.error("❌ Could not find any suitable artists")
+                    return
+                continue
+            
+            artist_name = artist_result["artist"]
+            
+            # Skip if already tried
+            if artist_name in excluded_for_this_genre:
+                continue
+            
+            # Try this artist
+            status_placeholder.info(f"🎤 Trying artist: {artist_name} (Attempt {attempt}/{MAX_ATTEMPTS})")
+            
+            # Find channel
+            locked_channel, channel_status, _ = find_and_lock_official_channel(
                 artist_name, genre_input, llm
             )
-        
-        if status == "NOT_FOUND" or not locked_channel:
-            st.error(f"❌ Could not find official channel for {artist_name}")
-            # Remove from excluded since we failed
-            st.session_state.excluded_by_genre[genre_key].remove(artist_name)
-            return
-        
-        st.markdown('<div class="success-box">✅ <strong>Official Channel Found:</strong> ' + locked_channel + '</div>', unsafe_allow_html=True)
-        
-        # Discover videos
-        with st.spinner(f"Discovering music videos from {locked_channel}..."):
+            
+            if channel_status == "NOT_FOUND" or not locked_channel:
+                # Channel not found, try next artist
+                st.session_state.excluded_by_genre[genre_key].append(artist_name)
+                if attempt < MAX_ATTEMPTS:
+                    time.sleep(0.5)
+                    continue
+                else:
+                    status_placeholder.error(f"❌ Could not find valid channels after {MAX_ATTEMPTS} attempts")
+                    return
+            
+            # Discover videos
             available_videos = discover_channel_videos(locked_channel, artist_name, llm)
-        
-        if not available_videos:
-            st.error(f"❌ No music videos found")
-            st.session_state.excluded_by_genre[genre_key].remove(artist_name)
-            return
-        
-        # Select 3 unique songs
-        with st.spinner("🤖 Selecting 3 unique songs..."):
+            
+            if not available_videos:
+                # No videos found, try next artist
+                st.session_state.excluded_by_genre[genre_key].append(artist_name)
+                if attempt < MAX_ATTEMPTS:
+                    time.sleep(0.5)
+                    continue
+                else:
+                    status_placeholder.error(f"❌ Could not find videos after {MAX_ATTEMPTS} attempts")
+                    return
+            
+            # Select 3 unique songs
             selected_videos = select_best_music_videos(available_videos, 3, llm)
+            
+            # CRITICAL: Must have exactly 3 songs
+            if len(selected_videos) < 3:
+                # Not enough songs, try next artist
+                st.session_state.excluded_by_genre[genre_key].append(artist_name)
+                if attempt < MAX_ATTEMPTS:
+                    time.sleep(0.5)
+                    continue
+                else:
+                    status_placeholder.error(f"❌ Could not find 3 unique songs after {MAX_ATTEMPTS} attempts")
+                    return
+            
+            # SUCCESS! We have artist, channel, and 3 songs
+            st.session_state.excluded_by_genre[genre_key].append(artist_name)
+            success = True
+            
+            # Clear status and show success
+            status_placeholder.empty()
+            
+            st.markdown('<div class="success-box">🎤 <strong>Artist Found:</strong> ' + artist_name + '</div>', unsafe_allow_html=True)
+            st.caption(f"Confidence: {artist_result.get('confidence', 'Medium')}")
+            
+            st.markdown("---")
+            st.markdown('<div class="success-box">✅ <strong>Official Channel:</strong> ' + locked_channel + '</div>', unsafe_allow_html=True)
+            
+            # Display results
+            st.markdown("---")
+            st.markdown(f"### 🎵 {artist_name} - Music Videos")
+            st.markdown(f'<div class="success-box">✅ Found 3 Unique Songs from {locked_channel}</div>', unsafe_allow_html=True)
+            
+            cols = st.columns(3)
+            
+            for idx, video in enumerate(selected_videos):
+                with cols[idx % 3]:
+                    st.markdown(f"**Song {idx+1}**")
+                    
+                    try:
+                        st.video(video['url'])
+                    except Exception:
+                        video_id = video['url'].split('v=')[1].split('&')[0]
+                        st.image(f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg")
+                    
+                    title = video['title']
+                    if len(title) > 50:
+                        title = title[:47] + "..."
+                    
+                    st.write(f"**{title}**")
+                    
+                    if video.get('duration'):
+                        st.caption(f"⏱️ {video['duration']}")
+                    
+                    st.markdown(
+                        f'<a href="{video["url"]}" target="_blank">'
+                        '<button style="background-color: #FF0000; color: white; '
+                        'border: none; padding: 8px 16px; border-radius: 4px; '
+                        'cursor: pointer; width: 100%;">▶ Watch on YouTube</button></a>',
+                        unsafe_allow_html=True
+                    )
+            
+            st.markdown("---")
+            remaining = 50 - len(excluded_for_this_genre)
+            if remaining > 0:
+                st.success(f"✅ Search again to discover more {genre_input} artists! (~{remaining} more available)")
+            else:
+                st.info(f"You've explored many {genre_input} artists! Try a different genre.")
+            
+            break  # Exit retry loop on success
         
-        if len(selected_videos) < 3:
-            st.warning(f"⚠️ Only found {len(selected_videos)} unique song(s)")
-        
-        # Display results
-        st.markdown("---")
-        st.markdown(f"### 🎵 {artist_name} - Music Videos")
-        st.markdown(f'<div class="success-box">✅ Found {len(selected_videos)} Unique Songs from {locked_channel}</div>', unsafe_allow_html=True)
-        
-        cols = st.columns(3)
-        
-        for idx, video in enumerate(selected_videos):
-            with cols[idx % 3]:
-                st.markdown(f"**Song {idx+1}**")
-                
-                try:
-                    st.video(video['url'])
-                except Exception:
-                    video_id = video['url'].split('v=')[1].split('&')[0]
-                    st.image(f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg")
-                
-                title = video['title']
-                if len(title) > 50:
-                    title = title[:47] + "..."
-                
-                st.write(f"**{title}**")
-                
-                if video.get('duration'):
-                    st.caption(f"⏱️ {video['duration']}")
-                
-                st.markdown(
-                    f'<a href="{video["url"]}" target="_blank">'
-                    '<button style="background-color: #FF0000; color: white; '
-                    'border: none; padding: 8px 16px; border-radius: 4px; '
-                    'cursor: pointer; width: 100%;">▶ Watch on YouTube</button></a>',
-                    unsafe_allow_html=True
-                )
-        
-        st.markdown("---")
-        remaining = 50 - len(excluded_for_this_genre)
-        if remaining > 0:
-            st.success(f"✅ Search again to discover more {genre_input} artists! (~{remaining} more available)")
-        else:
-            st.info(f"You've explored many {genre_input} artists! Try a different genre.")
+        if not success and attempt == MAX_ATTEMPTS:
+            status_placeholder.error(f"❌ Could not find a suitable artist with 3 songs after {MAX_ATTEMPTS} attempts. This genre might be too niche or have limited YouTube content.")
 
 if __name__ == "__main__":
     main()
