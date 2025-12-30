@@ -3,8 +3,9 @@ This is an AI Music Recommender that helps recommend and suggest artist and song
 
 Since the app requires a deepseek api key to run, I have created an alternate version via ollama which can be installed and run on your own local machine. However, do note that this might result in slower run times as ollama soley relies on your local machine whether it is using its cpu or gpu to run the LLM. I am also unable to use deepseek as my LLM within ollama as it is unable to carry out the task needed for the app to work. Please feel free to try your hand on other Ollama models, the one I have tried specifically is gemma3n:e4b. The code of it can be found via IAMUSIC(OLLAMA).
 
+# Running the app free via Ollama
 For running on Ollama, 
-# Install Python packages
+Install Python packages
 pip install langchain-community youtube-search streamlit langchain_core
 
 # Install Ollama (follow instructions at https://ollama.com)
@@ -22,12 +23,7 @@ If thats the case make sure to have the latest versions of #prerequisties instal
 
 
 <<APP WORKFLOW >>
-How the app works are as follows:
-User inputs a genre.
-App uses Deepseek as an LLM to find an artist in that genre who has an official YouTube channel and hasn't been suggested before.
-It then sort of locks the channel to restrict the LLM from only being able to pick videos from that channel only. 
-This forces the LLM to scrape that channel's content and pick the three most likely music videos from what's actually there. 
-This ensures that the LLM will not pick up videos unrelated to the songs or artist.
+app should always be in a retry loop if unable to find 3 videos from artist, unable to find another unique artist .borderline is if it is unable to recommend 3 unique and different songs from the same artist that has not been mentioned during the session despite a popular genre it should always, ALWAYS retry.IAMUSIC is an AI Music Recommender that helps recommend and suggest artist and songs based on the given genre. It has to be able to recommend 3 songs from the given genre. It will NOT recommend artists that have already been mentioned in the same session and will also be able to suggest songs from different languages(this should only be the case if the genre is of a different language other than english). The app will suggest songs that can be found from the artist's offical youtube channel. However, do note that since I am using deepseek api, it only has information until 2024 so artist emerging after that will NOT be suggested as well. The code is universal so there is no hardcoding at all. The code should accept any genre no matter the language or niche and provide an artist with an official youtube channel. After finding the channel, lock the channel so that the songs cannot be chosen out of the locked chanel and only from the channel that has been locked onto not anything else. The app should be able to recommend up to at least 50 artists if the genre is popular and should only be unable to do so if the genre is too niche.
 
 
 Have fun!
