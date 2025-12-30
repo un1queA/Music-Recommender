@@ -248,6 +248,145 @@ ANSWER:"""
         return "YES" in result.upper()[:3]
     except:
         return False
+    
+
+# =============================================================================
+# GENRE MAPPING & FALLBACK SYSTEM
+# =============================================================================
+
+def get_genre_taxonomy() -> str:
+    """Return comprehensive genre taxonomy as a string for LLM reference"""
+    return """TOP-LEVEL GENRE TAXONOMY (Use for mapping niche genres):
+
+MAJOR GLOBAL GENRES:
+1. Hip-Hop/R&B - Dominant category including rap, trap, drill
+2. Rock - All rock subgenres: classic, alternative, metal, punk
+3. Pop - Mainstream pop, synthpop, electropop
+4. Latin - Reggaeton, salsa, bachata, Latin pop
+5. Country - Traditional and modern country, Americana
+6. EDM - Electronic dance music, house, techno, trance
+7. Afrobeats - African popular music, Afropop
+8. K-Pop - Korean pop music and related
+9. Christian/Gospel - Religious and gospel music
+10. Indie & Alternative - Independent and alternative rock/pop
+
+EMERGING & REGIONAL SUBGENRES:
+• Amapiano - South African electronic
+• Phonk - Drift Phonk, Brazilian Phonk
+• Hyperpop - Glitchy, high-energy electronic pop
+• Corridos Tumbados - Regional Mexican
+• Drill - UK Drill, Brooklyn Drill
+• Melodic Techno - Emotional techno subgenre
+• Lo-fi Hip-Hop - Chill, study-focused hip-hop
+• Neo-Soul - Modern soul with R&B elements
+• Synthwave - 80s-inspired electronic
+
+ROCK & METAL SUBGENRES:
+• Punk Rock, Heavy Metal, Shoegaze, Grunge
+• Black Metal, Death Metal, Progressive Rock
+• Post-Rock, Indie Pop, Americana
+
+ELECTRONIC SUBGENRES:
+• House, Techno, Drum and Bass, Dubstep
+• Tropical House, Vaporwave, Trance
+• Acid Jazz, Future Bass, Nu-Disco
+
+JAZZ, CLASSICAL & GLOBAL:
+• Classical, Bebop, Smooth Jazz, Blues
+• Salsa, Bollywood, Ska, Ambient, Folk
+• Soundtrack/Cinematic
+
+RULES FOR MAPPING:
+1. Map niche genres to their closest MAJOR parent genre
+2. Preserve regional identity (e.g., "Tamil Pop" → "Pop (Tamil)")
+3. For very specific subgenres, use the broader category
+4. Keep language/cultural markers when relevant"""
+
+def map_to_known_genre(user_genre: str, llm: ChatOpenAI) -> str:
+    """Map user's niche genre to the closest known genre category"""
+    
+    genre_taxonomy = get_genre_taxonomy()
+    
+    prompt = PromptTemplate(
+        input_variables=["user_genre", "taxonomy"],
+        template="""The user searched for genre: "{user_genre}"
+
+GENRE TAXONOMY (for reference):
+{taxonomy}
+
+TASK: Map this user's genre to the MOST APPROPRIATE category from the taxonomy.
+
+CRITICAL RULES:
+1. If it's already a major genre, return it unchanged
+2. If it's a niche subgenre, find its parent major genre
+3. Preserve cultural/language markers when important
+4. Return ONLY the mapped genre name, nothing else
+
+Examples:
+• "Synthpop" → "Pop"
+• "UK Drill" → "Hip-Hop/R&B"
+• "Tamil film music" → "Bollywood (Tamil)"
+• "Deep House" → "EDM"
+• "K-Indie" → "Indie & Alternative"
+
+Mapped Genre:"""
+    )
+    
+    chain = LLMChain(llm=llm, prompt=prompt)
+    
+    try:
+        result = chain.run({"user_genre": user_genre, "taxonomy": genre_taxonomy})
+        mapped = result.strip().strip('"').strip("'")
+        
+        # Clean up
+        if "Mapped Genre:" in mapped:
+            mapped = mapped.split("Mapped Genre:")[1].strip()
+        
+        # Safety check: don't return empty or nonsense
+        if mapped and len(mapped) > 2 and len(mapped.split()) <= 5:
+            return mapped
+        else:
+            return user_genre  # Fallback to original
+    except:
+        return user_genre  # Fallback to original
+
+def enhanced_discover_songs(genre: str, excluded_artists: List[str], llm: ChatOpenAI) -> Optional[Dict]:
+    """
+    Enhanced discovery with genre mapping fallback
+    
+    Strategy:
+    1. First try: User's exact genre
+    2. If fails: Try mapped (broader) genre
+    3. If still fails: Try with genre synonyms
+    """
+    
+    # STEP 1: Try user's exact genre
+    result = discover_songs_fast(genre, excluded_artists, llm)
+    if result:
+        return result, "ORIGINAL_GENRE"
+    
+    # STEP 2: Map to known genre and retry
+    mapped_genre = map_to_known_genre(genre, llm)
+    
+    # Only proceed if mapped genre is different
+    if mapped_genre.lower() != genre.lower():
+        # Reset excluded for mapped genre (fresh search)
+        mapped_excluded = []
+        result = discover_songs_fast(mapped_genre, mapped_excluded, llm)
+        
+        if result:
+            return result, f"MAPPED_GENRE ({mapped_genre})"
+    
+    # STEP 3: Try language-based expansion
+    if " " in genre:
+        # Try last word (often the main genre)
+        base_genre = genre.split()[-1]
+        if base_genre.lower() != genre.lower():
+            result = discover_songs_fast(base_genre, excluded_artists, llm)
+            if result:
+                return result, f"BASE_GENRE ({base_genre})"
+    
+    return None, "ALL_FAILED"    
 
 # =============================================================================
 # OPTIMIZED VIDEO DISCOVERY
@@ -659,6 +798,7 @@ def main():
             )
     
     # Process search
+     # Process search
     if submit and genre:
         if not st.session_state.api_key:
             st.error("⚠️ Please enter your DeepSeek API key!")
@@ -685,36 +825,131 @@ def main():
         progress_placeholder = st.empty()
         progress_bar = st.progress(0)
         
-        # Main retry loop
+        # ENHANCED RETRY STRATEGY
         result = None
-        attempts = 0
+        strategy = None
+        attempts_made = 0
+        max_total_attempts = MAX_RETRY_ATTEMPTS * 2  # Allow for original + mapped
         
-        # Create retry loop with progress
-        for attempt in range(1, MAX_RETRY_ATTEMPTS + 1):
-            progress_bar.progress((attempt - 1) / MAX_RETRY_ATTEMPTS)
+        # Create multi-strategy search
+        for phase in ["original", "mapped", "broad"]:
+            if result:  # If we found something, stop
+                break
             
-            progress_placeholder.info(
-                f"🔍 **Attempt {attempt}/{MAX_RETRY_ATTEMPTS}**\n"
-                f"Searching for artists in **{genre.title()}**..."
-            )
-            
-            result = discover_songs_fast(genre, excluded, llm)
-            
-            if result:
-                artist = result['artist']
+            if phase == "original":
+                # Phase 1: Try original genre
+                progress_placeholder.info(
+                    f"🔍 **Phase 1:** Searching for **{genre.title()}** artists..."
+                )
                 
-                # Final uniqueness check
-                if artist in excluded:
-                    progress_placeholder.warning(f"Artist already suggested, trying next...")
-                    excluded.append(artist)
-                    continue
+                for attempt in range(1, MAX_RETRY_ATTEMPTS + 1):
+                    attempts_made += 1
+                    progress_bar.progress(min(attempts_made / max_total_attempts, 0.9))
+                    
+                    progress_placeholder.info(
+                        f"🔍 **Phase 1:** Attempt {attempt}/{MAX_RETRY_ATTEMPTS}\n"
+                        f"Searching **{genre.title()}**..."
+                    )
+                    
+                    result = discover_songs_fast(genre, excluded, llm)
+                    
+                    if result:
+                        strategy = "ORIGINAL_GENRE"
+                        break
+                    
+                    if attempt < MAX_RETRY_ATTEMPTS:
+                        progress_placeholder.warning(
+                            f"⚠️ Original genre attempt {attempt} failed. Retrying..."
+                        )
+            
+            elif phase == "mapped" and not result:
+                # Phase 2: Try mapped/broader genre
+                progress_placeholder.info(
+                    f"🔄 **Phase 2:** Trying broader genre categorization..."
+                )
                 
-                # SUCCESS - Update progress
+                mapped_genre = map_to_known_genre(genre, llm)
+                
+                if mapped_genre.lower() != genre.lower():
+                    progress_placeholder.info(
+                        f"🔄 Mapping '{genre}' → '{mapped_genre}' for better results..."
+                    )
+                    
+                    # Fresh search with mapped genre
+                    mapped_excluded = []
+                    
+                    for attempt in range(1, MAX_RETRY_ATTEMPTS + 1):
+                        attempts_made += 1
+                        progress_bar.progress(min(attempts_made / max_total_attempts, 0.95))
+                        
+                        progress_placeholder.info(
+                            f"🔄 **Phase 2:** Attempt {attempt}/{MAX_RETRY_ATTEMPTS}\n"
+                            f"Searching **{mapped_genre.title()}**..."
+                        )
+                        
+                        result = discover_songs_fast(mapped_genre, mapped_excluded, llm)
+                        
+                        if result:
+                            strategy = f"MAPPED_GENRE ({mapped_genre})"
+                            # Add to original excluded list too
+                            if result['artist'] not in excluded:
+                                excluded.append(result['artist'])
+                            break
+                        
+                        if attempt < MAX_RETRY_ATTEMPTS:
+                            progress_placeholder.warning(
+                                f"⚠️ Mapped genre attempt {attempt} failed. Retrying..."
+                            )
+            
+            elif phase == "broad" and not result:
+                # Phase 3: Last resort - try just the base word
+                if " " in genre:
+                    base_genre = genre.split()[-1]
+                    
+                    if base_genre.lower() != genre.lower() and len(base_genre) > 3:
+                        progress_placeholder.info(
+                            f"🌐 **Phase 3:** Trying base genre '{base_genre}'..."
+                        )
+                        
+                        for attempt in range(1, 2):  # Just one attempt for this
+                            attempts_made += 1
+                            progress_bar.progress(1.0)
+                            
+                            progress_placeholder.info(
+                                f"🌐 **Final attempt:** Searching **{base_genre.title()}**..."
+                            )
+                            
+                            result = discover_songs_fast(base_genre, excluded, llm)
+                            
+                            if result:
+                                strategy = f"BASE_GENRE ({base_genre})"
+                                break
+        
+        # Handle results
+        if result:
+            artist = result['artist']
+            
+            # Final uniqueness check
+            if artist in excluded:
+                progress_placeholder.warning(f"Artist already suggested, trying next...")
+                excluded.append(artist)
+            else:
+                # SUCCESS
                 progress_bar.progress(1.0)
-                progress_placeholder.success(f"✅ Found **{artist}** with {len(result['songs'])} songs!")
                 
                 # Add to excluded
                 excluded.append(artist)
+                
+                # Show strategy used
+                if strategy != "ORIGINAL_GENRE":
+                    progress_placeholder.success(
+                        f"✅ Found via {strategy}!\n"
+                        f"**Artist:** {artist} with {len(result['songs'])} songs"
+                    )
+                else:
+                    progress_placeholder.success(
+                        f"✅ Found **{artist}** with {len(result['songs'])} songs!"
+                    )
                 
                 # Calculate performance
                 elapsed = time.time() - start_time
@@ -725,45 +960,68 @@ def main():
                 )
                 
                 # Display results
-                display_results(result, genre)
-                break
-            
-            # Failed attempt
-            progress_placeholder.warning(
-                f"⚠️ Attempt {attempt} failed. "
-                f"Trying different artist..."
-            )
-        
-        # All attempts failed
-        if not result:
+                display_results(result, genre, strategy)
+        else:
+            # ALL ATTEMPTS FAILED
             progress_bar.progress(1.0)
-            progress_placeholder.error(
-                f"❌ Could not find suitable artist after {MAX_RETRY_ATTEMPTS} attempts.\n\n"
-                f"**Possible reasons:**\n"
-                f"• Genre might be too niche\n"
-                f"• Artists may not have official YouTube channels\n"
-                f"• Try a more popular genre or different phrasing"
-            )
             
-            # Show next steps
-            with st.expander("🔄 Try these alternatives"):
-                st.write("1. Try a broader genre (e.g., 'pop' instead of 'synthpop')")
-                st.write("2. Check spelling of the genre")
-                st.write("3. The system works best with established artists (pre-2024)")
-                st.write("4. Some languages may have limited YouTube presence")
+            # Smart error message based on genre
+            genre_lower = genre.lower()
+            
+            error_details = {
+                "message": f"❌ Could not find suitable artists for '{genre}'",
+                "reasons": [
+                    "• Genre might be too niche or misspelled",
+                    "• Artists may not have official YouTube channels",
+                    "• Try a broader genre or check spelling"
+                ],
+                "suggestions": []
+            }
+            
+            # Genre-specific suggestions
+            if "pop" in genre_lower:
+                error_details["suggestions"].extend([
+                    "Try: 'K-pop', 'J-pop', 'Synthpop', 'Indie Pop'"
+                ])
+            elif "rock" in genre_lower:
+                error_details["suggestions"].extend([
+                    "Try: 'Alternative Rock', 'Indie Rock', 'Classic Rock'"
+                ])
+            elif any(word in genre_lower for word in ["edm", "electronic", "techno", "house"]):
+                error_details["suggestions"].extend([
+                    "Try: 'EDM', 'House', 'Techno', 'Trance'"
+                ])
+            
+            # Display error
+            progress_placeholder.error(error_details["message"])
+            
+            with st.expander("🔍 Why this might have failed:"):
+                for reason in error_details["reasons"]:
+                    st.write(reason)
+                
+                if error_details["suggestions"]:
+                    st.markdown("**Try these similar genres:**")
+                    for suggestion in error_details["suggestions"]:
+                        st.write(suggestion)
 
-def display_results(result: Dict, genre: str):
-    """Optimized results display"""
+def display_results(result: Dict, genre: str, strategy: str = "ORIGINAL_GENRE"):
+    """Enhanced results display with strategy info"""
     
-    # Success header
+    # Success header with strategy indicator
     st.markdown("---")
-    st.markdown(f"## 🎤 {result['artist']}")
+    
+    col_header1, col_header2 = st.columns([3, 1])
+    with col_header1:
+        st.markdown(f"## 🎤 {result['artist']}")
+    with col_header2:
+        if "MAPPED" in strategy:
+            st.caption(f"🔄 Via: {strategy}")
     
     col_channel, col_stats = st.columns([2, 1])
     with col_channel:
         st.markdown(f'<div class="channel-badge">📺 {result["channel"]}</div>', unsafe_allow_html=True)
     with col_stats:
-        st.caption(f"🎵 {len(result['songs'])} unique songs • {genre.title()}")
+        st.caption(f"🎵 {len(result['songs'])} songs • {genre.title()}")
     
     # Display songs in columns
     st.markdown("### 🎵 Recommended Songs")
@@ -848,3 +1106,4 @@ def log_performance(operation: str, duration: float):
 
 if __name__ == "__main__":
     main()
+
