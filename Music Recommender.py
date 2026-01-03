@@ -21,6 +21,18 @@ SONGS_REQUIRED = 3
 CACHE_TTL = 3600  # Cache results for 1 hour
 MAX_WORKERS = 3   # Parallel processing
 
+# Top 50 Most Popular Genres Worldwide (for validation)
+TOP_50_POPULAR_GENRES = [
+    "Pop", "Rock", "Hip Hop", "Rap", "R&B", "Country", "Jazz", "Classical",
+    "Electronic", "EDM", "Blues", "Reggae", "Folk", "Metal", "Punk", "Soul",
+    "Funk", "Disco", "Techno", "House", "Trance", "Dubstep", "Indie", 
+    "Alternative", "K-pop", "J-pop", "Latin", "Reggaeton", "Salsa", 
+    "Bachata", "Tango", "Ska", "Gospel", "Christian", "World", "New Age",
+    "Ambient", "Soundtrack", "Musical", "Opera", "Anime", "Bollywood",
+    "Afrobeats", "Amapiano", "Phonk", "Hyperpop", "Synthwave", "Lo-fi",
+    "Drill", "Trap", "Vaporwave", "Future Bass", "Progressive", "Hardstyle"
+]
+
 # =============================================================================
 # CACHING SYSTEM - MAJOR SPEED BOOST
 # =============================================================================
@@ -72,24 +84,164 @@ def initialize_llm(api_key: str) -> Optional[ChatOpenAI]:
     try:
         return ChatOpenAI(
             model="deepseek-chat",
-            temperature=0.3,  # Lower temperature for faster, more consistent responses
+            temperature=0.3,
             openai_api_key=api_key,
             openai_api_base="https://api.deepseek.com",
-            max_tokens=800,   # Reduced for speed
-            timeout=15        # Reduced timeout
+            max_tokens=800,
+            timeout=15
         )
     except Exception as e:
         st.error(f"Failed to initialize DeepSeek: {e}")
         return None
 
 # =============================================================================
+# GLOBAL ARTIST EXCLUSION SYSTEM (NEW)
+# =============================================================================
+
+class GlobalExclusion:
+    """Manages global exclusion of artists across all genres"""
+    
+    def __init__(self):
+        if 'global_excluded_artists' not in st.session_state:
+            st.session_state.global_excluded_artists = []
+        if 'genre_exclusion_map' not in st.session_state:
+            st.session_state.genre_exclusion_map = {}
+    
+    def add_excluded_artist(self, artist: str, genre: str):
+        """Add artist to global exclusion list and genre-specific map"""
+        if artist not in st.session_state.global_excluded_artists:
+            st.session_state.global_excluded_artists.append(artist)
+        
+        # Add to genre-specific map
+        genre_key = genre.lower().strip()
+        if genre_key not in st.session_state.genre_exclusion_map:
+            st.session_state.genre_exclusion_map[genre_key] = []
+        
+        if artist not in st.session_state.genre_exclusion_map[genre_key]:
+            st.session_state.genre_exclusion_map[genre_key].append(artist)
+    
+    def is_artist_excluded(self, artist: str) -> bool:
+        """Check if artist is globally excluded"""
+        return artist in st.session_state.global_excluded_artists
+    
+    def get_excluded_artists_for_genre(self, genre: str) -> List[str]:
+        """Get artists excluded for a specific genre"""
+        genre_key = genre.lower().strip()
+        return st.session_state.genre_exclusion_map.get(genre_key, [])
+    
+    def get_all_excluded_artists(self) -> List[str]:
+        """Get all globally excluded artists"""
+        return st.session_state.global_excluded_artists.copy()
+    
+    def clear(self):
+        """Clear all exclusions"""
+        st.session_state.global_excluded_artists = []
+        st.session_state.genre_exclusion_map = {}
+
+# Global exclusion instance
+global_exclusion = GlobalExclusion()
+
+# =============================================================================
+# POPULAR GENRE VALIDATION (NEW)
+# =============================================================================
+
+def is_popular_genre(genre: str) -> bool:
+    """Check if the genre is in the top 50 popular genres"""
+    genre_lower = genre.lower().strip()
+    
+    # Check exact matches
+    for popular_genre in TOP_50_POPULAR_GENRES:
+        if genre_lower == popular_genre.lower():
+            return True
+    
+    # Check partial matches (e.g., "hip hop" contains "hip")
+    for popular_genre in TOP_50_POPULAR_GENRES:
+        if popular_genre.lower() in genre_lower or genre_lower in popular_genre.lower():
+            return True
+    
+    # Check genre synonyms
+    genre_synonyms = {
+        'hip hop': ['hiphop', 'hip-hop', 'rap'],
+        'r&b': ['rnb', 'rhythm and blues'],
+        'edm': ['electronic dance music'],
+        'k-pop': ['kpop', 'korean pop'],
+        'j-pop': ['jpop', 'japanese pop'],
+        'reggaeton': ['reggae ton', 'regueton'],
+        'afrobeats': ['afrobeat', 'afro beats'],
+        'amapiano': ['ama piano'],
+        'hyperpop': ['hyper pop'],
+        'synthwave': ['synth wave'],
+        'lo-fi': ['lofi', 'lo fi'],
+        'vaporwave': ['vapor wave'],
+        'future bass': ['futurebass'],
+        'hardstyle': ['hard style']
+    }
+    
+    for key, synonyms in genre_synonyms.items():
+        if genre_lower == key.lower() or genre_lower in [s.lower() for s in synonyms]:
+            return True
+        if key.lower() in genre_lower:
+            return True
+    
+    return False
+
+def find_closest_popular_genre(user_genre: str) -> Optional[str]:
+    """Find the closest popular genre match for the user's input"""
+    user_genre_lower = user_genre.lower().strip()
+    
+    # Exact match check
+    for popular_genre in TOP_50_POPULAR_GENRES:
+        if user_genre_lower == popular_genre.lower():
+            return popular_genre
+    
+    # Contains check
+    for popular_genre in TOP_50_POPULAR_GENRES:
+        if popular_genre.lower() in user_genre_lower:
+            return popular_genre
+    
+    # Levenshtein distance check (simple)
+    for popular_genre in TOP_50_POPULAR_GENRES:
+        popular_lower = popular_genre.lower()
+        if SequenceMatcher(None, user_genre_lower, popular_lower).ratio() > 0.7:
+            return popular_genre
+    
+    # Check genre synonyms
+    genre_synonyms = {
+        'hip hop': ['hiphop', 'hip-hop', 'rap'],
+        'r&b': ['rnb', 'rhythm and blues'],
+        'edm': ['electronic dance music'],
+        'k-pop': ['kpop', 'korean pop'],
+        'j-pop': ['jpop', 'japanese pop'],
+        'reggaeton': ['reggae ton', 'regueton'],
+        'afrobeats': ['afrobeat', 'afro beats'],
+        'amapiano': ['ama piano'],
+        'hyperpop': ['hyper pop'],
+        'synthwave': ['synth wave'],
+        'lo-fi': ['lofi', 'lo fi'],
+        'vaporwave': ['vapor wave'],
+        'future bass': ['futurebass'],
+        'hardstyle': ['hard style']
+    }
+    
+    for key, synonyms in genre_synonyms.items():
+        if user_genre_lower == key.lower() or user_genre_lower in [s.lower() for s in synonyms]:
+            return key
+        for synonym in synonyms:
+            if synonym in user_genre_lower or user_genre_lower in synonym:
+                return key
+    
+    return None
+
+# =============================================================================
 # OPTIMIZED ARTIST DISCOVERY (PARALLEL PROCESSING)
 # =============================================================================
 
-def find_artist_for_genre(genre: str, excluded_artists: List[str], llm: ChatOpenAI) -> List[str]:
-    """Find MULTIPLE artists at once to reduce retry loops"""
+def find_artist_for_genre(genre: str, llm: ChatOpenAI) -> List[str]:
+    """Find MULTIPLE artists at once with global exclusion check"""
     
-    excluded_text = ", ".join(excluded_artists[-10:]) if excluded_artists else "None"
+    # Get all globally excluded artists
+    global_excluded = global_exclusion.get_all_excluded_artists()
+    excluded_text = ", ".join(global_excluded) if global_excluded else "None"
     
     prompt = PromptTemplate(
         input_variables=["genre", "excluded"],
@@ -97,9 +249,10 @@ def find_artist_for_genre(genre: str, excluded_artists: List[str], llm: ChatOpen
 
 CRITICAL REQUIREMENTS:
 1. Each MUST have an official YouTube channel
-2. MUST be different from excluded artists: {excluded}
+2. MUST be different from these already-recommended artists: {excluded}
 3. Must have released music before 2024
 4. Must be well-known enough to have at least 3 music videos
+5. Artists should be active and popular in their genre
 
 Return EXACTLY in this format (one per line):
 1. [Artist 1]
@@ -119,7 +272,7 @@ Return EXACTLY in this format (one per line):
             if line and (line[0].isdigit() and '.' in line[:3]):
                 # Remove numbering
                 artist = line.split('.', 1)[1].strip().strip('"').strip("'")
-                if artist and artist not in excluded_artists:
+                if artist and not global_exclusion.is_artist_excluded(artist):
                     artists.append(artist)
         
         return artists[:3]  # Return up to 3 artists
@@ -248,7 +401,6 @@ ANSWER:"""
         return "YES" in result.upper()[:3]
     except:
         return False
-    
 
 # =============================================================================
 # GENRE MAPPING & FALLBACK SYSTEM
@@ -305,6 +457,12 @@ RULES FOR MAPPING:
 def map_to_known_genre(user_genre: str, llm: ChatOpenAI) -> str:
     """Map user's niche genre to the closest known genre category"""
     
+    # First check if it's a popular genre
+    closest_popular = find_closest_popular_genre(user_genre)
+    if closest_popular:
+        return closest_popular
+    
+    # If not, use LLM mapping
     genre_taxonomy = get_genre_taxonomy()
     
     prompt = PromptTemplate(
@@ -350,43 +508,170 @@ Mapped Genre:"""
     except:
         return user_genre  # Fallback to original
 
-def enhanced_discover_songs(genre: str, excluded_artists: List[str], llm: ChatOpenAI) -> Optional[Dict]:
+# =============================================================================
+# ENHANCED DISCOVERY WITH POPULAR GENRE VALIDATION (NEW)
+# =============================================================================
+
+def enhanced_discover_songs(genre: str, llm: ChatOpenAI) -> Tuple[Optional[Dict], str]:
     """
-    Enhanced discovery with genre mapping fallback
+    Enhanced discovery with multiple fallback strategies
     
-    Strategy:
-    1. First try: User's exact genre
-    2. If fails: Try mapped (broader) genre
-    3. If still fails: Try with genre synonyms
+    Returns: (result_dict, strategy_used)
+    Strategies: ORIGINAL_GENRE, MAPPED_GENRE, POPULAR_GENRE_FALLBACK, ALL_FAILED
     """
+    
+    # Check if genre is popular but search is failing
+    is_popular = is_popular_genre(genre)
     
     # STEP 1: Try user's exact genre
-    result = discover_songs_fast(genre, excluded_artists, llm)
+    result = discover_songs_fast(genre, llm)
     if result:
         return result, "ORIGINAL_GENRE"
     
-    # STEP 2: Map to known genre and retry
+    # STEP 2: If genre is popular but failed, try with special prompt
+    if is_popular:
+        # Special attempt for popular genres
+        result = discover_songs_fast_popular(genre, llm)
+        if result:
+            return result, "POPULAR_GENRE_FALLBACK"
+    
+    # STEP 3: Map to known genre and retry
     mapped_genre = map_to_known_genre(genre, llm)
     
-    # Only proceed if mapped genre is different
     if mapped_genre.lower() != genre.lower():
-        # Reset excluded for mapped genre (fresh search)
-        mapped_excluded = []
-        result = discover_songs_fast(mapped_genre, mapped_excluded, llm)
-        
+        result = discover_songs_fast(mapped_genre, llm)
         if result:
             return result, f"MAPPED_GENRE ({mapped_genre})"
     
-    # STEP 3: Try language-based expansion
+    # STEP 4: Try base word extraction
     if " " in genre:
-        # Try last word (often the main genre)
         base_genre = genre.split()[-1]
-        if base_genre.lower() != genre.lower():
-            result = discover_songs_fast(base_genre, excluded_artists, llm)
+        if base_genre.lower() != genre.lower() and len(base_genre) > 3:
+            result = discover_songs_fast(base_genre, llm)
             if result:
                 return result, f"BASE_GENRE ({base_genre})"
     
-    return None, "ALL_FAILED"    
+    # STEP 5: Final fallback for popular genres
+    if is_popular:
+        # Try one more time with aggressive search
+        result = discover_songs_aggressive(genre, llm)
+        if result:
+            return result, "POPULAR_GENRE_AGGRESSIVE"
+    
+    return None, "ALL_FAILED"
+
+def discover_songs_fast_popular(genre: str, llm: ChatOpenAI) -> Optional[Dict]:
+    """Special discovery for popular genres with more aggressive search"""
+    
+    # Get artists with emphasis on popularity
+    artists = find_artist_for_genre_popular(genre, llm)
+    if not artists:
+        return None
+    
+    for artist in artists:
+        # Check global exclusion
+        if global_exclusion.is_artist_excluded(artist):
+            continue
+        
+        # Fast channel discovery
+        channel = find_official_channel_parallel(artist, llm)
+        if not channel:
+            continue
+        
+        # Aggressive video discovery for popular genres
+        videos = discover_videos_from_channel_aggressive(channel, artist)
+        if len(videos) < SONGS_REQUIRED:
+            continue
+        
+        # Fast song selection
+        selected = select_unique_songs_fast(videos, SONGS_REQUIRED)
+        if len(selected) >= SONGS_REQUIRED:
+            return {
+                'artist': artist,
+                'channel': channel,
+                'songs': selected[:SONGS_REQUIRED]
+            }
+    
+    return None
+
+def find_artist_for_genre_popular(genre: str, llm: ChatOpenAI) -> List[str]:
+    """Find artists for popular genres with emphasis on mainstream artists"""
+    
+    global_excluded = global_exclusion.get_all_excluded_artists()
+    excluded_text = ", ".join(global_excluded) if global_excluded else "None"
+    
+    prompt = PromptTemplate(
+        input_variables=["genre", "excluded"],
+        template="""Find 5 DISTINCT POPULAR artists from the "{genre}" genre.
+
+IMPORTANT: {genre} is one of the world's most popular music genres!
+These artists should be MAINSTREAM and WELL-KNOWN.
+
+CRITICAL REQUIREMENTS:
+1. Each MUST have an official YouTube channel with VEVO or official branding
+2. MUST NOT include any of these already-recommended artists: {excluded}
+3. Must have released music before 2024
+4. Must be globally recognized with millions of views
+5. Focus on the MOST popular artists in this genre
+
+Return EXACTLY in this format (one per line):
+1. [Artist 1]
+2. [Artist 2] 
+3. [Artist 3]
+4. [Artist 4]
+5. [Artist 5]"""
+    )
+    
+    chain = LLMChain(llm=llm, prompt=prompt)
+    
+    try:
+        result = chain.run({"genre": genre, "excluded": excluded_text})
+        
+        artists = []
+        for line in result.strip().split('\n'):
+            line = line.strip()
+            if line and (line[0].isdigit() and '.' in line[:3]):
+                artist = line.split('.', 1)[1].strip().strip('"').strip("'")
+                if artist and not global_exclusion.is_artist_excluded(artist):
+                    artists.append(artist)
+        
+        return artists[:5]
+    except:
+        return []
+
+def discover_songs_aggressive(genre: str, llm: ChatOpenAI) -> Optional[Dict]:
+    """Aggressive search for difficult cases"""
+    
+    # Try multiple search strategies
+    search_variations = [
+        genre,
+        f"{genre} music",
+        f"best {genre} artists",
+        f"top {genre} singers"
+    ]
+    
+    for search_term in search_variations:
+        artists = find_artist_for_genre(search_term, llm)
+        
+        for artist in artists:
+            if global_exclusion.is_artist_excluded(artist):
+                continue
+            
+            channel = find_official_channel_parallel(artist, llm)
+            if not channel:
+                continue
+            
+            videos = discover_videos_from_channel_aggressive(channel, artist)
+            if len(videos) >= SONGS_REQUIRED:
+                selected = select_unique_songs_fast(videos, SONGS_REQUIRED)
+                if len(selected) >= SONGS_REQUIRED:
+                    return {
+                        'artist': artist,
+                        'channel': channel,
+                        'songs': selected[:SONGS_REQUIRED]
+                    }
+    
+    return None
 
 # =============================================================================
 # OPTIMIZED VIDEO DISCOVERY
@@ -395,7 +680,6 @@ def enhanced_discover_songs(genre: str, excluded_artists: List[str], llm: ChatOp
 def discover_videos_from_channel_fast(channel_name: str, artist_name: str) -> List[Dict]:
     """Fast video discovery with better filtering"""
     
-    # OPTIMIZED: Fewer, smarter searches
     searches = [
         f"{channel_name} official video",
         channel_name,
@@ -422,7 +706,7 @@ def discover_videos_from_channel_fast(channel_name: str, artist_name: str) -> Li
                 # Fast scoring
                 score = score_music_video_fast(result)
                 
-                if score >= 25:  # Lower threshold to get more videos
+                if score >= 25:
                     all_videos.append({
                         'id': video_id,
                         'url': f"https://www.youtube.com/watch?v={video_id}",
@@ -432,7 +716,7 @@ def discover_videos_from_channel_fast(channel_name: str, artist_name: str) -> Li
                         'score': score
                     })
                     
-                    if len(all_videos) >= 25:  # Stop when we have enough
+                    if len(all_videos) >= 25:
                         break
                         
             if len(all_videos) >= 25:
@@ -443,25 +727,80 @@ def discover_videos_from_channel_fast(channel_name: str, artist_name: str) -> Li
     
     # Sort and return
     all_videos.sort(key=lambda x: x['score'], reverse=True)
-    return all_videos[:20]  # Return top 20
+    return all_videos[:20]
+
+def discover_videos_from_channel_aggressive(channel_name: str, artist_name: str) -> List[Dict]:
+    """More aggressive video discovery for difficult cases"""
+    
+    searches = [
+        channel_name,
+        f"{channel_name} music",
+        f"{artist_name} - {channel_name}",
+        f"{channel_name} playlist",
+        f"{artist_name} songs",
+        f"{artist_name} music videos"
+    ]
+    
+    all_videos = []
+    seen_ids = set()
+    
+    for search in searches:
+        try:
+            results = cached_youtube_search(search, max_results=50)
+            
+            for result in results:
+                # More lenient channel matching for aggressive search
+                channel = result['channel'].strip().lower()
+                if channel_name.lower() not in channel and artist_name.lower() not in channel:
+                    continue
+                
+                video_id = result['id']
+                if video_id in seen_ids:
+                    continue
+                seen_ids.add(video_id)
+                
+                # More lenient scoring
+                score = score_music_video_aggressive(result)
+                
+                if score >= 20:
+                    all_videos.append({
+                        'id': video_id,
+                        'url': f"https://www.youtube.com/watch?v={video_id}",
+                        'title': result['title'],
+                        'duration': result.get('duration', ''),
+                        'views': result.get('views', ''),
+                        'score': score
+                    })
+                    
+                    if len(all_videos) >= 30:
+                        break
+                        
+            if len(all_videos) >= 30:
+                break
+                
+        except Exception:
+            continue
+    
+    all_videos.sort(key=lambda x: x['score'], reverse=True)
+    return all_videos[:25]
 
 def score_music_video_fast(video: Dict) -> int:
     """Optimized video scoring"""
     score = 0
     title = video['title'].lower()
     
-    # Duration check (fast path)
+    # Duration check
     if video.get('duration'):
         try:
             parts = video['duration'].split(':')
             if len(parts) == 2:
                 mins = int(parts[0])
-                if 2 <= mins <= 8:  # Optimal range
+                if 2 <= mins <= 8:
                     score += 60
         except:
             pass
     
-    # Title patterns (single pass)
+    # Title patterns
     patterns = ['official video', 'music video', ' mv ', 'official audio']
     for pattern in patterns:
         if pattern in title:
@@ -482,6 +821,46 @@ def score_music_video_fast(video: Dict) -> int:
             score += 30
         elif 'k' in views:
             score += 15
+    
+    return max(0, score)
+
+def score_music_video_aggressive(video: Dict) -> int:
+    """More lenient video scoring for aggressive search"""
+    score = 0
+    title = video['title'].lower()
+    
+    # Duration check (more lenient)
+    if video.get('duration'):
+        try:
+            parts = video['duration'].split(':')
+            if len(parts) == 2:
+                mins = int(parts[0])
+                if 1 <= mins <= 10:  # Wider range
+                    score += 40
+        except:
+            pass
+    
+    # Title patterns (more lenient)
+    patterns = ['official', 'video', 'music', 'song', 'audio', 'lyric']
+    for pattern in patterns:
+        if pattern in title:
+            score += 20
+            break
+    
+    # Avoid obvious non-music (less strict)
+    non_music = ['interview', 'behind the scenes', 'making of']
+    for pattern in non_music:
+        if pattern in title:
+            score -= 20
+            break
+    
+    # Views (more lenient)
+    if video.get('views'):
+        views = video['views'].lower()
+        if 'm' in views:
+            score += 25
+        elif 'k' in views:
+            score += 10
     
     return max(0, score)
 
@@ -520,7 +899,6 @@ def select_unique_songs_fast(videos: List[Dict], count: int) -> List[Dict]:
 
 def extract_base_title(title: str) -> str:
     """Extract the main song title from video title"""
-    # Remove common suffixes
     patterns_to_remove = [
         r'\s*\(.*?\)',  # Parentheses content
         r'\s*\[.*?\]',  # Bracket content  
@@ -546,18 +924,22 @@ def extract_base_title(title: str) -> str:
 # OPTIMIZED MAIN DISCOVERY PIPELINE
 # =============================================================================
 
-def discover_songs_fast(genre: str, excluded_artists: List[str], llm: ChatOpenAI) -> Optional[Dict]:
+def discover_songs_fast(genre: str, llm: ChatOpenAI) -> Optional[Dict]:
     """
-    Optimized pipeline with early termination and batch processing
+    Optimized pipeline with global exclusion check
     """
     
     # Step 1: Get multiple artists at once
-    artists = find_artist_for_genre(genre, excluded_artists, llm)
+    artists = find_artist_for_genre(genre, llm)
     if not artists:
         return None
     
     # Step 2: Try each artist until success
     for artist in artists:
+        # Skip if artist is globally excluded
+        if global_exclusion.is_artist_excluded(artist):
+            continue
+        
         # Fast channel discovery
         channel = find_official_channel_parallel(artist, llm)
         if not channel:
@@ -583,14 +965,17 @@ def discover_songs_fast(genre: str, excluded_artists: List[str], llm: ChatOpenAI
 # OPTIMIZED RETRY MECHANISM
 # =============================================================================
 
-def retry_with_progress(genre: str, excluded_artists: List[str], llm: ChatOpenAI, 
-                       progress_placeholder, max_attempts: int = MAX_RETRY_ATTEMPTS):
+def retry_with_progress(genre: str, llm: ChatOpenAI, progress_placeholder, 
+                       max_attempts: int = MAX_RETRY_ATTEMPTS):
     """
-    Optimized retry loop with progress updates
+    Optimized retry loop with progress updates and global exclusion
     """
     
     attempts = 0
     start_time = time.time()
+    
+    # Check if genre is popular
+    is_popular = is_popular_genre(genre)
     
     while attempts < max_attempts:
         attempts += 1
@@ -600,23 +985,31 @@ def retry_with_progress(genre: str, excluded_artists: List[str], llm: ChatOpenAI
             f"(Elapsed: {int(time.time() - start_time)}s)"
         )
         
-        result = discover_songs_fast(genre, excluded_artists, llm)
+        # Use enhanced discovery
+        result, strategy = enhanced_discover_songs(genre, llm)
         
         if result:
-            # Success - validate uniqueness
-            if result['artist'] in excluded_artists:
-                progress_placeholder.warning(f"⚠️ Artist already suggested, trying next...")
-                excluded_artists.append(result['artist'])
+            # Check global exclusion (should already be done, but double-check)
+            if global_exclusion.is_artist_excluded(result['artist']):
+                progress_placeholder.warning(
+                    f"⚠️ Artist '{result['artist']}' already suggested globally, trying next..."
+                )
                 continue
                 
-            return result, attempts
+            return result, attempts, strategy
         
         # Failed, update progress
-        progress_placeholder.warning(
-            f"⚠️ Attempt {attempts} failed, retrying with different artist..."
-        )
+        if is_popular and attempts >= max_attempts - 1:
+            progress_placeholder.warning(
+                f"⚠️ Popular genre '{genre}' is taking longer than expected. "
+                f"Trying aggressive search..."
+            )
+        else:
+            progress_placeholder.warning(
+                f"⚠️ Attempt {attempts} failed, retrying..."
+            )
     
-    return None, attempts
+    return None, attempts, "ALL_FAILED"
 
 # =============================================================================
 # OPTIMIZED STREAMLIT UI
@@ -630,10 +1023,13 @@ def main():
         initial_sidebar_state="expanded"
     )
     
+    # Initialize global exclusion
+    global global_exclusion
+    global_exclusion = GlobalExclusion()
+    
     # Session state - optimized
     session_defaults = {
         'api_key': "",
-        'excluded_by_genre': {},
         'total_searches': 0,
         'cache_hits': 0,
         'last_genre': "",
@@ -712,12 +1108,11 @@ def main():
     col1, col2 = st.columns([3, 1])
     with col1:
         st.markdown('<h1 class="main-header">🎵 AI Music Recommender</h1>', unsafe_allow_html=True)
-        st.caption("⚡ Optimized for speed • Universal genre support • 100% accurate channel locking")
+        st.caption("⚡ Optimized for speed • Universal genre support • Global artist tracking • Popular genre validation")
     
     with col2:
         if st.session_state.total_searches > 0:
             avg_time = st.session_state.performance_stats['avg_time']
-            cache_hits = st.session_state.get('cache_hits', 0)
             st.markdown(f'<div class="performance-badge">⚡ Avg: {avg_time:.1f}s</div>', unsafe_allow_html=True)
     
     # Sidebar - optimized
@@ -744,13 +1139,14 @@ def main():
         with col_stat1:
             st.metric("Total Searches", st.session_state.total_searches)
         with col_stat2:
-            cache_hits = st.session_state.get('cache_hits', 0)
-            st.metric("Cache Hits", cache_hits)
+            st.metric("Cache Hits", st.session_state.get('cache_hits', 0))
         
-        if st.session_state.excluded_by_genre:
-            st.markdown("**Recent Genres:**")
-            for genre, artists in list(st.session_state.excluded_by_genre.items())[:3]:
-                st.caption(f"• {genre.title()}: {len(artists)} artists")
+        # Global exclusion stats
+        excluded_count = len(global_exclusion.get_all_excluded_artists())
+        if excluded_count > 0:
+            st.markdown(f"**Globally Excluded Artists:** {excluded_count}")
+            recent_artists = global_exclusion.get_all_excluded_artists()[-5:]
+            st.caption(f"Recent: {', '.join(recent_artists)}")
         
         st.markdown("---")
         
@@ -762,17 +1158,30 @@ def main():
                 st.rerun()
         
         with col_btn2:
-            if st.button("🧹 Reset All", use_container_width=True):
+            if st.button("🧹 Reset All", use_container_width=True, type="secondary"):
+                global_exclusion.clear()
                 for key in list(st.session_state.keys()):
                     del st.session_state[key]
                 st.rerun()
+        
+        # Genre information
+        with st.expander("🌍 Popular Genres Supported"):
+            st.write("**Top 50 Most Popular Genres:**")
+            cols = st.columns(3)
+            genres_per_col = len(TOP_50_POPULAR_GENRES) // 3
+            for i in range(3):
+                with cols[i]:
+                    start = i * genres_per_col
+                    end = start + genres_per_col
+                    for genre in TOP_50_POPULAR_GENRES[start:end]:
+                        st.caption(f"• {genre}")
         
         # Quick tips
         with st.expander("💡 Tips for faster results"):
             st.write("""
             1. **Popular genres** work fastest
             2. Clear cache if results seem stale
-            3. The system learns from previous searches
+            3. Artists are tracked globally across all genres
             4. First search may be slower due to caching
             """)
     
@@ -785,7 +1194,7 @@ def main():
         with col_input:
             genre = st.text_input(
                 "Enter a genre",
-                placeholder="e.g., K-pop, Bollywood, Reggaeton, Synthwave, J-pop...",
+                placeholder="e.g., K-pop, Bollywood, Reggaeton, Synthwave, J-pop, Anime...",
                 label_visibility="collapsed",
                 value=st.session_state.get('last_genre', '')
             )
@@ -798,7 +1207,6 @@ def main():
             )
     
     # Process search
-     # Process search
     if submit and genre:
         if not st.session_state.api_key:
             st.error("⚠️ Please enter your DeepSeek API key!")
@@ -812,185 +1220,191 @@ def main():
             if not llm:
                 return
         
-        # Get excluded artists for this genre
-        genre_key = genre.lower().strip()
+        # Update session state
         st.session_state.last_genre = genre
-        if genre_key not in st.session_state.excluded_by_genre:
-            st.session_state.excluded_by_genre[genre_key] = []
-        
-        excluded = st.session_state.excluded_by_genre[genre_key]
         st.session_state.total_searches += 1
         
         # Progress tracking
         progress_placeholder = st.empty()
         progress_bar = st.progress(0)
         
-        # ENHANCED RETRY STRATEGY
+        # Check if genre is popular
+        is_popular = is_popular_genre(genre)
+        
+        # ENHANCED RETRY STRATEGY WITH GLOBAL EXCLUSION
         result = None
         strategy = None
         attempts_made = 0
-        max_total_attempts = MAX_RETRY_ATTEMPTS * 2  # Allow for original + mapped
         
-        # Create multi-strategy search
-        for phase in ["original", "mapped", "broad"]:
-            if result:  # If we found something, stop
+        # Show initial status
+        if is_popular:
+            progress_placeholder.info(
+                f"🎯 **{genre.title()}** is a popular genre! "
+                f"Using optimized search..."
+            )
+        else:
+            progress_placeholder.info(
+                f"🔍 Searching for **{genre.title()}**..."
+            )
+        
+        # Multi-phase search with global exclusion
+        phases = [
+            ("original", genre, MAX_RETRY_ATTEMPTS),
+        ]
+        
+        # Add mapped genre phase
+        mapped_genre = map_to_known_genre(genre, llm)
+        if mapped_genre.lower() != genre.lower():
+            phases.append(("mapped", mapped_genre, MAX_RETRY_ATTEMPTS))
+        
+        # Add base genre phase
+        if " " in genre:
+            base_genre = genre.split()[-1]
+            if base_genre.lower() != genre.lower() and len(base_genre) > 3:
+                phases.append(("base", base_genre, 1))
+        
+        # Add aggressive phase for popular genres
+        if is_popular:
+            phases.append(("aggressive", genre, 2))
+        
+        total_phases = len(phases)
+        current_phase = 0
+        
+        for phase_name, search_genre, phase_attempts in phases:
+            current_phase += 1
+            progress_bar.progress(current_phase / (total_phases + 1))
+            
+            if result:
                 break
             
-            if phase == "original":
-                # Phase 1: Try original genre
+            phase_display_name = {
+                "original": "Original Genre",
+                "mapped": "Mapped Genre",
+                "base": "Base Genre",
+                "aggressive": "Aggressive Search"
+            }.get(phase_name, phase_name)
+            
+            if phase_name == "mapped":
                 progress_placeholder.info(
-                    f"🔍 **Phase 1:** Searching for **{genre.title()}** artists..."
+                    f"🔄 **Phase {current_phase}/{total_phases}:** "
+                    f"Trying broader genre '{search_genre}'..."
                 )
+            else:
+                progress_placeholder.info(
+                    f"🔍 **Phase {current_phase}/{total_phases}:** "
+                    f"Searching {phase_display_name}..."
+                )
+            
+            for attempt in range(1, phase_attempts + 1):
+                attempts_made += 1
                 
-                for attempt in range(1, MAX_RETRY_ATTEMPTS + 1):
-                    attempts_made += 1
-                    progress_bar.progress(min(attempts_made / max_total_attempts, 0.9))
-                    
+                if phase_attempts > 1:
                     progress_placeholder.info(
-                        f"🔍 **Phase 1:** Attempt {attempt}/{MAX_RETRY_ATTEMPTS}\n"
-                        f"Searching **{genre.title()}**..."
+                        f"   ↳ Attempt {attempt}/{phase_attempts} for '{search_genre}'..."
                     )
-                    
-                    result = discover_songs_fast(genre, excluded, llm)
-                    
-                    if result:
-                        strategy = "ORIGINAL_GENRE"
-                        break
-                    
-                    if attempt < MAX_RETRY_ATTEMPTS:
+                
+                # Search for songs
+                result = discover_songs_fast(search_genre, llm)
+                
+                if result:
+                    # Double-check global exclusion
+                    if global_exclusion.is_artist_excluded(result['artist']):
                         progress_placeholder.warning(
-                            f"⚠️ Original genre attempt {attempt} failed. Retrying..."
+                            f"⚠️ Found '{result['artist']}' but artist was already "
+                            f"suggested in a previous search. Trying next..."
                         )
-            
-            elif phase == "mapped" and not result:
-                # Phase 2: Try mapped/broader genre
-                progress_placeholder.info(
-                    f"🔄 **Phase 2:** Trying broader genre categorization..."
-                )
+                        result = None
+                        continue
+                    
+                    # Set strategy
+                    if phase_name == "original":
+                        strategy = "ORIGINAL_GENRE"
+                    elif phase_name == "mapped":
+                        strategy = f"MAPPED_GENRE ({search_genre})"
+                    elif phase_name == "base":
+                        strategy = f"BASE_GENRE ({search_genre})"
+                    else:
+                        strategy = "AGGRESSIVE_SEARCH"
+                    break
                 
-                mapped_genre = map_to_known_genre(genre, llm)
-                
-                if mapped_genre.lower() != genre.lower():
-                    progress_placeholder.info(
-                        f"🔄 Mapping '{genre}' → '{mapped_genre}' for better results..."
+                if attempt < phase_attempts:
+                    progress_placeholder.warning(
+                        f"   ↳ Attempt {attempt} failed, retrying..."
                     )
-                    
-                    # Fresh search with mapped genre
-                    mapped_excluded = []
-                    
-                    for attempt in range(1, MAX_RETRY_ATTEMPTS + 1):
-                        attempts_made += 1
-                        progress_bar.progress(min(attempts_made / max_total_attempts, 0.95))
-                        
-                        progress_placeholder.info(
-                            f"🔄 **Phase 2:** Attempt {attempt}/{MAX_RETRY_ATTEMPTS}\n"
-                            f"Searching **{mapped_genre.title()}**..."
-                        )
-                        
-                        result = discover_songs_fast(mapped_genre, mapped_excluded, llm)
-                        
-                        if result:
-                            strategy = f"MAPPED_GENRE ({mapped_genre})"
-                            # Add to original excluded list too
-                            if result['artist'] not in excluded:
-                                excluded.append(result['artist'])
-                            break
-                        
-                        if attempt < MAX_RETRY_ATTEMPTS:
-                            progress_placeholder.warning(
-                                f"⚠️ Mapped genre attempt {attempt} failed. Retrying..."
-                            )
             
-            elif phase == "broad" and not result:
-                # Phase 3: Last resort - try just the base word
-                if " " in genre:
-                    base_genre = genre.split()[-1]
-                    
-                    if base_genre.lower() != genre.lower() and len(base_genre) > 3:
-                        progress_placeholder.info(
-                            f"🌐 **Phase 3:** Trying base genre '{base_genre}'..."
-                        )
-                        
-                        for attempt in range(1, 2):  # Just one attempt for this
-                            attempts_made += 1
-                            progress_bar.progress(1.0)
-                            
-                            progress_placeholder.info(
-                                f"🌐 **Final attempt:** Searching **{base_genre.title()}**..."
-                            )
-                            
-                            result = discover_songs_fast(base_genre, excluded, llm)
-                            
-                            if result:
-                                strategy = f"BASE_GENRE ({base_genre})"
-                                break
+            if result:
+                break
         
         # Handle results
         if result:
             artist = result['artist']
             
-            # Final uniqueness check
-            if artist in excluded:
-                progress_placeholder.warning(f"Artist already suggested, trying next...")
-                excluded.append(artist)
-            else:
-                # SUCCESS
-                progress_bar.progress(1.0)
-                
-                # Add to excluded
-                excluded.append(artist)
-                
-                # Show strategy used
-                if strategy != "ORIGINAL_GENRE":
-                    progress_placeholder.success(
-                        f"✅ Found via {strategy}!\n"
-                        f"**Artist:** {artist} with {len(result['songs'])} songs"
-                    )
-                else:
-                    progress_placeholder.success(
-                        f"✅ Found **{artist}** with {len(result['songs'])} songs!"
-                    )
-                
-                # Calculate performance
-                elapsed = time.time() - start_time
-                st.session_state.performance_stats['total_time'] += elapsed
-                st.session_state.performance_stats['avg_time'] = (
-                    st.session_state.performance_stats['total_time'] / 
-                    st.session_state.total_searches
+            # Final check and add to global exclusion
+            if global_exclusion.is_artist_excluded(artist):
+                progress_placeholder.error(
+                    f"❌ Artist '{artist}' was already suggested globally. "
+                    f"This shouldn't happen - please try a different genre."
                 )
-                
-                # Display results
-                display_results(result, genre, strategy)
+                return
+            
+            # Add artist to global exclusion
+            global_exclusion.add_excluded_artist(artist, genre)
+            
+            # SUCCESS
+            progress_bar.progress(1.0)
+            
+            # Show success message with strategy
+            if "MAPPED" in strategy or "BASE" in strategy:
+                progress_placeholder.success(
+                    f"✅ Found via {strategy}!\n"
+                    f"**Artist:** {artist} with {len(result['songs'])} songs"
+                )
+            else:
+                progress_placeholder.success(
+                    f"✅ Found **{artist}** with {len(result['songs'])} songs!"
+                )
+            
+            # Calculate performance
+            elapsed = time.time() - start_time
+            st.session_state.performance_stats['total_time'] += elapsed
+            st.session_state.performance_stats['avg_time'] = (
+                st.session_state.performance_stats['total_time'] / 
+                st.session_state.total_searches
+            )
+            
+            # Display results
+            display_results(result, genre, strategy)
         else:
             # ALL ATTEMPTS FAILED
             progress_bar.progress(1.0)
             
-            # Smart error message based on genre
-            genre_lower = genre.lower()
-            
+            # Enhanced error messaging
             error_details = {
                 "message": f"❌ Could not find suitable artists for '{genre}'",
-                "reasons": [
-                    "• Genre might be too niche or misspelled",
-                    "• Artists may not have official YouTube channels",
-                    "• Try a broader genre or check spelling"
-                ],
+                "reasons": [],
                 "suggestions": []
             }
             
-            # Genre-specific suggestions
-            if "pop" in genre_lower:
-                error_details["suggestions"].extend([
-                    "Try: 'K-pop', 'J-pop', 'Synthpop', 'Indie Pop'"
+            # Check if genre is popular
+            if is_popular:
+                error_details["reasons"].extend([
+                    f"• '{genre}' is a popular genre but no artists found",
+                    "• All potential artists may have been suggested already",
+                    "• Try clearing the cache and excluded artists list"
                 ])
-            elif "rock" in genre_lower:
-                error_details["suggestions"].extend([
-                    "Try: 'Alternative Rock', 'Indie Rock', 'Classic Rock'"
+                error_details["suggestions"].append("Try: Clear cache and excluded artists, then search again")
+            else:
+                error_details["reasons"].extend([
+                    "• Genre might be too niche or misspelled",
+                    "• Artists may not have official YouTube channels",
+                    "• Try a broader or more common genre name"
                 ])
-            elif any(word in genre_lower for word in ["edm", "electronic", "techno", "house"]):
-                error_details["suggestions"].extend([
-                    "Try: 'EDM', 'House', 'Techno', 'Trance'"
-                ])
+            
+            # Check how many artists are globally excluded
+            excluded_count = len(global_exclusion.get_all_excluded_artists())
+            if excluded_count > 0:
+                error_details["reasons"].append(f"• {excluded_count} artists have already been suggested in this session")
+                error_details["suggestions"].append("Try: Clear excluded artists to see previously suggested artists again")
             
             # Display error
             progress_placeholder.error(error_details["message"])
@@ -1000,9 +1414,9 @@ def main():
                     st.write(reason)
                 
                 if error_details["suggestions"]:
-                    st.markdown("**Try these similar genres:**")
+                    st.markdown("**Suggestions:**")
                     for suggestion in error_details["suggestions"]:
-                        st.write(suggestion)
+                        st.write(f"• {suggestion}")
 
 def display_results(result: Dict, genre: str, strategy: str = "ORIGINAL_GENRE"):
     """Enhanced results display with strategy info"""
@@ -1014,12 +1428,13 @@ def display_results(result: Dict, genre: str, strategy: str = "ORIGINAL_GENRE"):
     with col_header1:
         st.markdown(f"## 🎤 {result['artist']}")
     with col_header2:
-        if "MAPPED" in strategy:
+        if "MAPPED" in strategy or "BASE" in strategy:
             st.caption(f"🔄 Via: {strategy}")
     
     col_channel, col_stats = st.columns([2, 1])
     with col_channel:
-        st.markdown(f'<div class="channel-badge">📺 {result["channel"]}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="channel-badge">🔒 LOCKED CHANNEL: {result["channel"]}</div>', unsafe_allow_html=True)
+        st.caption("All songs are from this official channel only")
     with col_stats:
         st.caption(f"🎵 {len(result['songs'])} songs • {genre.title()}")
     
@@ -1077,20 +1492,15 @@ def display_results(result: Dict, genre: str, strategy: str = "ORIGINAL_GENRE"):
     # Next steps
     st.markdown("---")
     
-    # Show how many more artists available
-    genre_key = genre.lower().strip()
-    excluded = st.session_state.excluded_by_genre.get(genre_key, [])
-    remaining = 50 - len(excluded)
+    # Show global exclusion info
+    excluded_count = len(global_exclusion.get_all_excluded_artists())
     
-    if remaining > 0:
-        col_next, col_stats = st.columns([2, 1])
-        with col_next:
-            if st.button(f"🔍 Discover Another {genre.title()} Artist", type="secondary", use_container_width=True):
-                st.rerun()
-        with col_stats:
-            st.caption(f"~{remaining} more artists available")
-    else:
-        st.info("🎉 You've explored many artists in this genre! Try a different genre.")
+    col_next, col_stats = st.columns([2, 1])
+    with col_next:
+        if st.button(f"🔍 Discover Another {genre.title()} Artist", type="secondary", use_container_width=True):
+            st.rerun()
+    with col_stats:
+        st.caption(f"{excluded_count} artists suggested this session")
 
 # Performance monitoring
 def log_performance(operation: str, duration: float):
@@ -1106,4 +1516,3 @@ def log_performance(operation: str, duration: float):
 
 if __name__ == "__main__":
     main()
-
