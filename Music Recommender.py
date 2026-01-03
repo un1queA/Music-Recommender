@@ -705,20 +705,6 @@ def main():
         font-weight: 600;
     }
     
-    .video-card {
-        background: #f8f9fa;
-        border-radius: 12px;
-        padding: 20px;
-        margin-bottom: 20px;
-        border: 2px solid #e9ecef;
-        transition: all 0.3s ease;
-    }
-    
-    .video-card:hover {
-        transform: translateY(-5px);
-        box-shadow: 0 10px 30px rgba(0,0,0,0.15);
-        border-color: #667eea;
-    }
     
     .stButton > button {
         width: 100%;
@@ -735,7 +721,7 @@ def main():
     """, unsafe_allow_html=True)
     
     # Header
-    st.markdown('<h1 class="main-header">🎵 IAMUSIC - AI Music Recommender</h1>', unsafe_allow_html=True)
+    st.markdown('<h1 class="main-header">🎵 IAMUSIC </h1>', unsafe_allow_html=True)
     st.markdown("""
     <div style='background: linear-gradient(135deg, #667eea20 0%, #764ba220 100%); padding: 15px; border-radius: 10px; margin-bottom: 20px;'>
     <b>🔒 Absolute No-Repeat Guarantee:</b> Once an artist is suggested, they will NEVER appear again in this session, regardless of genre.<br>
@@ -968,7 +954,6 @@ def display_results(result: Dict, genre: str):
         with cols[idx]:
             with st.container():
                 st.markdown(f"""
-                <div class='video-card'>
                 <div style='display: flex; justify-content: space-between; align-items: start; margin-bottom: 10px;'>
                 <div style='font-weight: 600; color: #667eea;'>Song #{idx + 1}</div>
                 <div style='font-size: 0.8em; background: #e9ecef; padding: 2px 8px; border-radius: 4px;'>
