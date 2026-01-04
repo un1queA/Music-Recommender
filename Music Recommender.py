@@ -905,10 +905,9 @@ def display_results(result: Dict, genre: str):
     st.markdown(f"""
     <div style='background: #f0f2f6; padding: 15px; border-radius: 10px; margin: 15px 0;'>
     <div style='display: flex; align-items: center; gap: 10px;'>
-    <div style='font-size: 24px;'>🔒</div>
-    <div>
+    <div style='font-size: 18px; color: #4A00E0;'>🔒</div>
     <div style='font-weight: 600; color: #4A00E0;'>LOCKED CHANNEL</div>
-    <div style='color: #666;'>{result['channel']}</div>
+    <div style='font-size: 0.9em; color: #666;'>{result['channel']}</div>
     <div style='font-size: 0.9em; color: #666;'>All songs below are exclusively from this verified official channel</div>
     </div>
     </div>
