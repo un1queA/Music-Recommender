@@ -705,6 +705,20 @@ def main():
         font-weight: 600;
     }
     
+    .video-card {
+        background: #f8f9fa;
+        border-radius: 12px;
+        padding: 20px;
+        margin-bottom: 20px;
+        border: 2px solid #e9ecef;
+        transition: all 0.3s ease;
+    }
+    
+    .video-card:hover {
+        transform: translateY(-5px);
+        box-shadow: 0 10px 30px rgba(0,0,0,0.15);
+        border-color: #667eea;
+    }
     
     .stButton > button {
         width: 100%;
@@ -721,12 +735,16 @@ def main():
     """, unsafe_allow_html=True)
     
     # Header
-    st.markdown('<h1 class="main-header">🎵 IAMUSIC </h1>', unsafe_allow_html=True)
+    st.markdown('<h1 class="main-header">🎵 IAMUSIC - AI Music Recommender</h1>', unsafe_allow_html=True)
     st.markdown("""
-
+    <div style='background: linear-gradient(135deg, #667eea20 0%, #764ba220 100%); padding: 15px; border-radius: 10px; margin-bottom: 20px;'>
+    <b>🔒 Absolute No-Repeat Guarantee:</b> Once an artist is suggested, they will NEVER appear again in this session, regardless of genre.<br>
+    <b>🎯 Channel Locking:</b> All songs come exclusively from the artist's official YouTube channel.<br>
+    <b>🌍 Universal:</b> Works with any genre, any language, any niche.
+    </div>
     """, unsafe_allow_html=True)
     
-    # Sidebar
+    # Sidebar - FIXED SECTION
     with st.sidebar:
         st.header("⚙️ Configuration")
         
@@ -765,20 +783,25 @@ def main():
         
         st.markdown("---")
         
-        # Controls
+        # Controls - FIXED: Removed the problematic column creation
         st.header("🛠️ Controls")
         
-        col1 = st.columns(1)
-        with col1:
-            if st.button("🧹 Reset Session", use_container_width=True, type="secondary"):
-                exclusion_manager.clear_all_exclusions()
-                st.success("Session reset! All artists can be suggested again.")
-                time.sleep(1)
-                st.rerun()
+        # Simple button without columns
+        if st.button("🧹 Reset Session", use_container_width=True, type="secondary"):
+            exclusion_manager.clear_all_exclusions()
+            st.success("Session reset! All artists can be suggested again.")
+            time.sleep(1)
+            st.rerun()
         
-       
-        
-       
+        # Popular genres quick access
+        with st.expander("🌍 Popular Genres (Quick Pick)"):
+            popular_genres = get_popular_genres()
+            cols = st.columns(3)
+            for idx, genre in enumerate(popular_genres[:12]):  # Show first 12
+                with cols[idx % 3]:
+                    if st.button(genre, key=f"quick_{genre}"):
+                        st.session_state.last_genre = genre
+                        st.rerun()
     
     # Main search interface
     st.markdown("### 🎶 Discover New Artists & Songs")
@@ -850,7 +873,13 @@ def main():
             stats = exclusion_manager.get_statistics()
             
             st.markdown(f"""
-       
+            <div class='success-box'>
+            <h3>✅ Success! Found New Artist</h3>
+            <p><b>Artist:</b> {artist}</p>
+            <p><b>For Genre:</b> {genre}</p>
+            <p><b>Time:</b> {elapsed_time:.1f}s</p>
+            <p><b>Session Stats:</b> {stats['total_excluded']} unique artists suggested so far</p>
+            </div>
             """, unsafe_allow_html=True)
             
             # Display results
@@ -911,10 +940,10 @@ def display_results(result: Dict, genre: str):
     st.markdown(f"""
     <div style='background: #f0f2f6; padding: 15px; border-radius: 10px; margin: 15px 0;'>
     <div style='display: flex; align-items: center; gap: 10px;'>
-    <div style='font-size: 24px;'>🔒; color: #666;</div>
+    <div style='font-size: 24px;'>🔒</div>
     <div>
     <div style='font-weight: 600; color: #4A00E0;'>LOCKED CHANNEL</div>
-    <div>{result['channel']}; color: #666';</div>
+    <div>{result['channel']}</div>
     <div style='font-size: 0.9em; color: #666;'>All songs below are exclusively from this verified official channel</div>
     </div>
     </div>
@@ -931,9 +960,10 @@ def display_results(result: Dict, genre: str):
         with cols[idx]:
             with st.container():
                 st.markdown(f"""
+                <div class='video-card'>
                 <div style='display: flex; justify-content: space-between; align-items: start; margin-bottom: 10px;'>
                 <div style='font-weight: 600; color: #667eea;'>Song #{idx + 1}</div>
-                <div style='font-size: 0.8em;padding: 2px 8px; border-radius: 4px;'>
+                <div style='font-size: 0.8em; background: #e9ecef; padding: 2px 8px; border-radius: 4px;'>
                 Score: {song.get('score', 0)}
                 </div>
                 </div>
@@ -961,7 +991,9 @@ def display_results(result: Dict, genre: str):
                     if song.get('views'):
                         st.caption(f"👁️ {song['views']}")
                 
-       
+                # Quality indicator
+                if song.get('score', 0) > 60:
+                    st.success("✓ High quality match")
                 
                 # Watch button
                 st.markdown(
@@ -978,7 +1010,18 @@ def display_results(result: Dict, genre: str):
     # Next search option
     st.markdown("---")
     
- 
+    col1, col2, col3 = st.columns([2, 1, 1])
+    with col1:
+        if st.button(f"🔍 Discover Another {genre} Artist", use_container_width=True):
+            st.rerun()
+    
+    with col2:
+        stats = exclusion_manager.get_statistics()
+        st.metric("Unique Artists", stats['total_excluded'])
+    
+    with col3:
+        avg_time = st.session_state.performance_stats.get('avg_time', 0)
+        st.metric("Avg Time", f"{avg_time:.1f}s")
 
 if __name__ == "__main__":
     main()
