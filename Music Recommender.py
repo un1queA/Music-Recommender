@@ -904,14 +904,15 @@ def display_results(result: Dict, genre: str):
     # Channel info with LOCKED badge
     st.markdown(f"""
     <div style='background: #f0f2f6; padding: 15px; border-radius: 10px; margin: 15px 0;'>
-    <div style='display: flex; align-items: center; gap: 10px;'>
+    <div style='display: flex; align-items: center; gap: 8px; margin-bottom: 8px;'>
     <div style='font-size: 18px; color: #4A00E0;'>🔒</div>
-    <div style='font-weight: 600; color: #4A00E0;'>LOCKED CHANNEL</div><br>
-    <div style='font-size: 0.9em; color: #666;'>{result['channel']}</div><br>
+    <div style='font-weight: 600; color: #4A00E0;'>LOCKED CHANNEL</div>
+    </div>
+    <div style='margin-left: 0;'>
+    <div style='font-size: 0.9em; color: #666; margin-bottom: 4px;'>{result['channel']}</div>
     <div style='font-size: 0.9em; color: #666;'>All songs below are exclusively from this verified official channel</div>
     </div>
-    </div>
-    </div>
+</div>
     """, unsafe_allow_html=True)
     
     # Songs
