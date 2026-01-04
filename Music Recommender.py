@@ -661,7 +661,7 @@ def is_genre_popular(genre: str) -> bool:
 
 def main():
     st.set_page_config(
-        page_title="IAMUSIC - Absolute No-Repeat Music Recommender",
+        page_title="IAMUSIC",
         page_icon="🎵",
         layout="wide",
         initial_sidebar_state="expanded"
@@ -794,7 +794,7 @@ def main():
         
         with col2:
             submit = st.form_submit_button(
-                "🚀 Discover Music",
+                "Search",
                 use_container_width=True,
                 type="primary"
             )
@@ -908,7 +908,7 @@ def display_results(result: Dict, genre: str):
     <div style='font-size: 24px;'>🔒</div>
     <div>
     <div style='font-weight: 600; color: #4A00E0;'>LOCKED CHANNEL</div>
-    <div>{result['channel']}</div>
+    <div style='color: #666;'>{result['channel']}</div>
     <div style='font-size: 0.9em; color: #666;'>All songs below are exclusively from this verified official channel</div>
     </div>
     </div>
