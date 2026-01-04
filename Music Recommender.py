@@ -768,20 +768,15 @@ def main():
         # Controls
         st.header("🛠️ Controls")
         
-        col1, col2 = st.columns(2)
+        col1 = st.columns(1)
         with col1:
-            if st.button("🔄 Clear Cache", use_container_width=True):
-                search_cache.clear()
-                st.success("Cache cleared!")
-                time.sleep(1)
-                st.rerun()
-        
-        with col2:
             if st.button("🧹 Reset Session", use_container_width=True, type="secondary"):
                 exclusion_manager.clear_all_exclusions()
                 st.success("Session reset! All artists can be suggested again.")
                 time.sleep(1)
                 st.rerun()
+        
+       
         
        
     
@@ -916,10 +911,10 @@ def display_results(result: Dict, genre: str):
     st.markdown(f"""
     <div style='background: #f0f2f6; padding: 15px; border-radius: 10px; margin: 15px 0;'>
     <div style='display: flex; align-items: center; gap: 10px;'>
-    <div style='font-size: 24px;'>🔒</div>
+    <div style='font-size: 24px;'>🔒; color: #666;</div>
     <div>
     <div style='font-weight: 600; color: #4A00E0;'>LOCKED CHANNEL</div>
-    <div>{result['channel']} color: #666</div>
+    <div>{result['channel']}; color: #666';</div>
     <div style='font-size: 0.9em; color: #666;'>All songs below are exclusively from this verified official channel</div>
     </div>
     </div>
@@ -938,7 +933,7 @@ def display_results(result: Dict, genre: str):
                 st.markdown(f"""
                 <div style='display: flex; justify-content: space-between; align-items: start; margin-bottom: 10px;'>
                 <div style='font-weight: 600; color: #667eea;'>Song #{idx + 1}</div>
-                <div style='font-size: 0.8em; background: #e9ecef; padding: 2px 8px; border-radius: 4px;'>
+                <div style='font-size: 0.8em;padding: 2px 8px; border-radius: 4px;'>
                 Score: {song.get('score', 0)}
                 </div>
                 </div>
