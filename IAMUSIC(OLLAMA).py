@@ -1,607 +1,343 @@
-# prerequisites:
-# pip install langchain-community youtube-search streamlit langchain_core
-# Run: streamlit run app.py
+# IAMUSIC - OLLAMA VERSION (Fixed Model Detection)
+# Run: streamlit run IAMUSIC_OLLAMA_FIXED.py
 
 import streamlit as st
 import re
+import time
+import json
+import requests
 from typing import Dict, List, Optional, Tuple
 from youtube_search import YoutubeSearch
-import time
-
-# Import LangChain components for Ollama
-from langchain_community.chat_models import ChatOllama
+from langchain_community.llms import Ollama
 from langchain_core.prompts import PromptTemplate
-from langchain.chains import LLMChain, SequentialChain
+from langchain.chains import LLMChain
+from difflib import SequenceMatcher
 
 # =============================================================================
-# LLM-POWERED SONG DEDUPLICATION (SMARTER THAN REGEX)
+# CONFIGURATION
 # =============================================================================
 
-def are_songs_different_llm(title1: str, title2: str, llm) -> bool:
-    """
-    Use Ollama (DeepSeek) to intelligently determine if two video titles represent DIFFERENT SONGS.
-    Returns True if they're DIFFERENT songs, False if they're the SAME song (different versions).
-    """
-    
-    prompt = PromptTemplate(
-        input_variables=["title1", "title2"],
-        template="""Analyze these two YouTube video titles from a music channel:
-        
-        Title 1: "{title1}"
-        Title 2: "{title2}"
-        
-        Determine if these represent DIFFERENT SONGS or just DIFFERENT VERSIONS of the SAME SONG.
-        
-        CONSIDER:
-        - Same song can have: (Official Video), (Live), (Acoustic), (Remix), (Lyrics), [4K], etc.
-        - Different songs will have different core titles/names
-        - Featured artists (ft./feat.) don't necessarily mean different songs
-        - Language doesn't matter - focus on the core song identity
-        - Live performances, acoustic versions, remixes, lyric videos of the SAME song = SAME SONG
-        
-        Return EXACTLY:
-        DIFFERENT: [YES/NO]
-        REASON: [Brief explanation]"""
-    )
-    
-    chain = LLMChain(llm=llm, prompt=prompt)
-    
-    try:
-        result = chain.run({"title1": title1, "title2": title2})
-        
-        # Parse the result
-        different = "NO"  # Default to "same song"
-        for line in result.strip().split('\n'):
-            if line.startswith("DIFFERENT:"):
-                different = line.replace("DIFFERENT:", "").strip().upper()
-                break
-        
-        # Return True if LLM says they're DIFFERENT songs
-        return different == "YES"
-        
-    except Exception as e:
-        # Fallback to simple string comparison if LLM fails
-        return title1 != title2
-
-def select_best_music_videos(videos: List[Dict], count: int, llm) -> List[Dict]:
-    """
-    Select the best music videos using LLM to ensure DIFFERENT SONGS.
-    Much more accurate than regex-based approaches.
-    """
-    
-    if not videos or not llm:
-        return videos[:count] if videos else []
-    
-    if len(videos) <= count:
-        return videos[:count]
-    
-    # Sort by score (best first)
-    sorted_videos = sorted(videos, key=lambda x: x.get('score', 0), reverse=True)
-    
-    selected = []
-    
-    for video in sorted_videos:
-        if len(selected) >= count:
-            break
-        
-        # Check if this video is a DIFFERENT SONG from all already selected
-        is_different_song = True
-        
-        if selected:  # Only check if we already have selected videos
-            for selected_video in selected:
-                # Use LLM to check if songs are different
-                if not are_songs_different_llm(video['title'], selected_video['title'], llm):
-                    is_different_song = False
-                    break
-        
-        if is_different_song:
-            selected.append(video)
-    
-    # If we couldn't find enough distinct songs, take top scored ones anyway
-    if len(selected) < count:
-        selected = sorted_videos[:count]
-    
-    return selected[:count]
+MAX_RETRY_ATTEMPTS = 3
+SONGS_REQUIRED = 3
+CACHE_TTL = 3600
+MAX_WORKERS = 3
 
 # =============================================================================
-# CORE: LANGUAGE-AGNOSTIC CHANNEL & VIDEO DISCOVERY
+# FOOLPROOF GLOBAL STATE MANAGEMENT
 # =============================================================================
 
-def initialize_llm(model_name="gemma3n:e4b", base_url="http://localhost:11434"):
-    """Initialize the LLM with Ollama and verify it can actually respond."""
-    try:
-        from langchain_community.chat_models import ChatOllama
-        llm = ChatOllama(
-            model=model_name,
-            temperature=0.7,
-            base_url=base_url,
-            timeout=60
-        )
-        # Make a simple test call to verify the model works
-        test_response = llm.invoke("Reply with the word 'OK'.")
-        if "OK" in test_response.content:
-            st.success(f"✅ Connected to Ollama. Using model: {model_name}")
-            return llm
+class AbsoluteExclusionManager:
+    """Absolute exclusion system - no artist repeats EVER in same session"""
+    
+    def __init__(self):
+        self.init_session_state()
+    
+    def init_session_state(self):
+        """Initialize all session state variables"""
+        defaults = {
+            'absolute_excluded_artists': [],
+            'artist_exclusion_count': 0,
+            'search_session_history': [],
+            'genre_artist_map': {},
+            'artist_genre_map': {},
+            'total_searches': 0,
+            'performance_stats': {'avg_time': 0, 'total_time': 0, 'successful_searches': 0},
+            'ollama_base_url': "http://localhost:11434",
+            'ollama_model': "llama3.2:3b",  # Changed to your available model
+            'last_genre': "",
+            'search_cache': {},
+            'last_search_time': 0,
+            'available_models': [],
+            'ollama_connected': False
+        }
+        
+        for key, value in defaults.items():
+            if key not in st.session_state:
+                st.session_state[key] = value
+    
+    def register_artist(self, artist: str, genre: str):
+        """Register an artist as absolutely excluded across ALL genres"""
+        artist_normalized = self.normalize_artist_name(artist)
+        
+        if artist_normalized not in st.session_state.absolute_excluded_artists:
+            st.session_state.absolute_excluded_artists.append(artist_normalized)
+            st.session_state.artist_exclusion_count += 1
+        
+        history_entry = {
+            'artist': artist,
+            'normalized_artist': artist_normalized,
+            'genre': genre,
+            'timestamp': time.time(),
+            'search_number': st.session_state.total_searches
+        }
+        st.session_state.search_session_history.append(history_entry)
+        
+        if genre not in st.session_state.genre_artist_map:
+            st.session_state.genre_artist_map[genre] = []
+        st.session_state.genre_artist_map[genre].append(artist_normalized)
+        
+        st.session_state.artist_genre_map[artist_normalized] = genre
+    
+    def is_artist_excluded(self, artist: str) -> bool:
+        """Check if artist is absolutely excluded"""
+        if not artist:
+            return False
+        
+        artist_normalized = self.normalize_artist_name(artist)
+        
+        if artist_normalized in st.session_state.absolute_excluded_artists:
+            return True
+        
+        for excluded_artist in st.session_state.absolute_excluded_artists:
+            if self.are_artists_similar(artist_normalized, excluded_artist):
+                return True
+        
+        return False
+    
+    def normalize_artist_name(self, artist: str) -> str:
+        """Normalize artist name for consistent comparison"""
+        normalized = artist.lower().strip()
+        normalized = re.sub(r'\s+', ' ', normalized)
+        normalized = re.sub(r'[^\w\s]', '', normalized)
+        
+        common_words = ['the', 'and', '&', 'feat', 'featuring', 'ft', 'vs', 'x']
+        words = normalized.split()
+        filtered_words = [w for w in words if w not in common_words]
+        
+        return ' '.join(filtered_words).strip()
+    
+    def are_artists_similar(self, artist1: str, artist2: str, threshold: float = 0.8) -> bool:
+        """Check if two artist names are similar using fuzzy matching"""
+        return SequenceMatcher(None, artist1, artist2).ratio() >= threshold
+    
+    def get_exclusion_list_for_prompt(self, max_artists: int = 50) -> str:
+        """Get formatted exclusion list for LLM prompt"""
+        if not st.session_state.absolute_excluded_artists:
+            return "No artists have been recommended yet."
+        
+        excluded_list = st.session_state.absolute_excluded_artists.copy()
+        
+        if len(excluded_list) <= max_artists:
+            formatted_list = ", ".join([f'"{artist}"' for artist in excluded_list])
+            return f"NEVER suggest these already-recommended artists: {formatted_list}"
         else:
-            st.warning("⚠️ Ollama responded, but the test failed. Model may not be ready.")
-            return None
+            first_20 = excluded_list[:20]
+            last_20 = excluded_list[-20:]
+            formatted = ", ".join([f'"{artist}"' for artist in first_20 + ["..."] + last_20])
+            return f"NEVER suggest these {len(excluded_list)} already-recommended artists (showing some): {formatted}"
+    
+    def clear_all_exclusions(self):
+        """Clear all exclusions"""
+        st.session_state.absolute_excluded_artists = []
+        st.session_state.artist_exclusion_count = 0
+        st.session_state.search_session_history = []
+        st.session_state.genre_artist_map = {}
+        st.session_state.artist_genre_map = {}
+        st.session_state.total_searches = 0
+        st.session_state.performance_stats = {'avg_time': 0, 'total_time': 0, 'successful_searches': 0}
+        st.session_state.last_genre = ""
+        st.session_state.search_cache = {}
+    
+    def get_statistics(self) -> Dict:
+        """Get exclusion statistics"""
+        return {
+            'total_excluded': len(st.session_state.absolute_excluded_artists),
+            'total_searches': st.session_state.total_searches,
+            'successful_searches': st.session_state.performance_stats['successful_searches'],
+            'unique_genres': len(st.session_state.genre_artist_map)
+        }
+
+exclusion_manager = AbsoluteExclusionManager()
+
+# =============================================================================
+# OLLAMA CONNECTION MANAGEMENT - FIXED VERSION
+# =============================================================================
+
+def get_available_models(base_url: str) -> List[str]:
+    """Get list of available models from Ollama"""
+    try:
+        response = requests.get(f"{base_url}/api/tags", timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            models = [model['name'] for model in data.get('models', [])]
+            return models
     except Exception as e:
-        st.error(f"❌ Failed to initialize Ollama LLM: {e}")
-        st.info("""
-        **Troubleshooting steps:**
-        1. **Check if Ollama is running:** Open `http://localhost:11434` in your browser. It should say 'Ollama is running'.
-        2. **Verify your model is pulled:** Run `ollama list` in your terminal to see if the model '{model_name}' is downloaded.
-        3. **Pull the model if missing:** Run `ollama pull {model_name}`.
-        """)
+        st.error(f"Error fetching models: {e}")
+    return []
+
+def test_ollama_connection(base_url: str, model: str = None) -> Tuple[bool, str, List[str]]:
+    """Test connection to Ollama and model"""
+    try:
+        # Test if Ollama server is running
+        response = requests.get(f"{base_url}/api/tags", timeout=5)
+        if response.status_code != 200:
+            return False, "Ollama server not responding", []
+        
+        # Get available models
+        data = response.json()
+        available_models = [model['name'] for model in data.get('models', [])]
+        
+        if not available_models:
+            return False, "No models found. Pull a model first.", []
+        
+        # If model is specified, check if it's available
+        if model:
+            if model not in available_models:
+                # Find similar model
+                model_lower = model.lower()
+                for available in available_models:
+                    if model_lower in available.lower() or available.lower() in model_lower:
+                        return True, f"Using similar model: {available}", available_models
+                
+                return False, f"Model '{model}' not found. Available: {', '.join(available_models)}", available_models
+            
+            # Test the specific model
+            test_prompt = {"model": model, "prompt": "Hello", "stream": False}
+            response = requests.post(f"{base_url}/api/generate", json=test_prompt, timeout=10)
+            if response.status_code == 200:
+                return True, "Connection successful", available_models
+            else:
+                return False, f"Model test failed: {response.status_code}", available_models
+        
+        # If no model specified, just return success
+        return True, "Ollama server is running", available_models
+            
+    except requests.exceptions.ConnectionError:
+        return False, f"Cannot connect to Ollama at {base_url}. Make sure Ollama is running.", []
+    except Exception as e:
+        return False, f"Error: {str(e)}", []
+
+# =============================================================================
+# ENHANCED CACHING SYSTEM
+# =============================================================================
+
+class SmartSearchCache:
+    """Smart caching with genre awareness"""
+    
+    def __init__(self):
+        self.cache = {}
+        self.timestamps = {}
+    
+    def get(self, key: str):
+        if key in self.cache and (time.time() - self.timestamps.get(key, 0)) < CACHE_TTL:
+            return self.cache[key]
+        return None
+    
+    def set(self, key: str, value):
+        self.cache[key] = value
+        self.timestamps[key] = time.time()
+    
+    def clear(self):
+        self.cache.clear()
+        self.timestamps.clear()
+
+search_cache = SmartSearchCache()
+
+def smart_youtube_search(query: str, max_results: int = 50) -> List[Dict]:
+    """Smart YouTube search with caching"""
+    cache_key = f"youtube_{query}_{max_results}"
+    
+    cached = search_cache.get(cache_key)
+    if cached is not None:
+        return cached
+    
+    try:
+        results = YoutubeSearch(query, max_results=max_results).to_dict()
+        search_cache.set(cache_key, results)
+        return results
+    except Exception as e:
+        return []
+
+# =============================================================================
+# OLLAMA LLM INITIALIZATION - SIMPLIFIED
+# =============================================================================
+
+def initialize_llm() -> Optional[Ollama]:
+    """Initialize Ollama LLM with error handling"""
+    base_url = st.session_state.get('ollama_base_url', "http://localhost:11434")
+    model = st.session_state.get('ollama_model', "llama3.2:3b")
+    
+    # Test connection
+    with st.spinner("🔗 Testing Ollama connection..."):
+        connected, message, available_models = test_ollama_connection(base_url, model)
+        
+        if not connected:
+            st.error(f"❌ {message}")
+            
+            if available_models:
+                st.info(f"📋 Available models: {', '.join(available_models)}")
+                # Auto-select first available model
+                if available_models:
+                    st.session_state.ollama_model = available_models[0]
+                    st.info(f"🔄 Auto-selected model: {available_models[0]}")
+                    st.rerun()
+            
+            with st.expander("🔧 Setup Instructions"):
+                st.write("""
+                1. **Install Ollama**: [ollama.ai](https://ollama.ai)
+                2. **Pull a model**:
+                ```bash
+                # Based on your available models:
+                ollama pull llama3.2:3b
+                # or try a more capable model:
+                ollama pull llama3.1:8b
+                ```
+                3. **Start Ollama** (if not running):
+                ```bash
+                ollama serve
+                ```
+                4. **Refresh this page**
+                """)
+            return None
+        
+        st.session_state.ollama_connected = True
+        st.session_state.available_models = available_models
+    
+    try:
+        # Initialize Ollama with optimized settings
+        return Ollama(
+            model=model,
+            base_url=base_url,
+            temperature=0.3,
+            num_predict=500,  # Reduced for speed
+            timeout=30,
+            num_ctx=2048  # Context window
+        )
+    except Exception as e:
+        st.error(f"Failed to initialize Ollama: {e}")
         return None
 
-def get_artist_search_queries(artist_name: str, genre: str, llm) -> List[str]:
-    """Generate queries that specifically avoid label channels"""
-    
-    prompt = PromptTemplate(
-        input_variables=["artist_name", "genre"],
-        template="""For the artist "{artist_name}" (genre: {genre}), generate 3 YouTube search queries
-        that will best find THEIR PERSONAL/OFFICIAL channel (not record label channels).
-        
-        AVOID queries that might return:
-        - Record label channels
-        - Music company channels  
-        - Compilation channels
-        
-        FAVOR queries that might return:
-        - Artist's personal channel
-        - Artist's topic channel
-        - Artist's name exactly
-        
-        Return EXACTLY 3 queries separated by | (pipe symbol):
-        QUERY_1 | QUERY_2 | QUERY_3"""
-    )
-    
-    chain = LLMChain(llm=llm, prompt=prompt)
-    
-    try:
-        result = chain.run({"artist_name": artist_name, "genre": genre})
-        queries = [q.strip() for q in result.split('|') if q.strip()]
-        return queries[:3]
-    except:
-        # Fallback queries if LLM fails
-        return [
-            f"{artist_name} official",
-            f"{artist_name} topic",
-            f"{artist_name}"
-        ]
-
-def find_and_lock_official_channel(artist_name: str, genre: str, llm) -> Tuple[Optional[str], str, List[str]]:
-    """
-    ENHANCED: Better channel matching that avoids record label/company channels
-    """
-    
-    # Get smart search queries from LLM
-    search_queries = get_artist_search_queries(artist_name, genre, llm)
-    
-    all_candidates = []
-    
-    for search_query in search_queries:
-        try:
-            results = YoutubeSearch(search_query, max_results=15).to_dict()
-            
-            for result in results:
-                channel_name = result['channel'].strip()
-                channel_lower = channel_name.lower()
-                title_lower = result['title'].lower()
-                
-                # ENHANCED SCORING SYSTEM
-                score = 0
-                penalties = 0
-                
-                # ====== POSITIVE SCORING (Artist-Focused) ======
-                
-                # 1. Artist name matching (flexible, any script) - INCREASED WEIGHT
-                artist_words = set(re.findall(r'[\w\u4e00-\u9fff\uac00-\ud7a3\u3040-\u309f\u30a0-\u30ff\u0400-\u04FF]+', artist_name.lower(), re.UNICODE))
-                channel_words = set(re.findall(r'[\w\u4e00-\u9fff\uac00-\ud7a3\u3040-\u309f\u30a0-\u30ff\u0400-\u04FF]+', channel_lower, re.UNICODE))
-                
-                common_words = artist_words.intersection(channel_words)
-                if common_words:
-                    score += len(common_words) * 30  # Increased from 20
-                
-                # 2. EXACT MATCH BONUS - Channel name contains artist name exactly
-                artist_name_lower = artist_name.lower()
-                if artist_name_lower in channel_lower:
-                    score += 50  # Significant bonus for exact match
-                elif any(word in channel_lower for word in artist_name_lower.split()):
-                    score += 30  # Partial match bonus
-                
-                # 3. Channel name cleanliness - individual artists usually have simpler names
-                name_cleanliness = 0
-                clean_name = re.sub(r'[^a-zA-Z0-9\s\u4e00-\u9fff\uac00-\ud7a3\u3040-\u309f\u30a0-\u30ff\u0400-\u04FF]', '', channel_name)
-                if len(channel_name) == len(clean_name):
-                    name_cleanliness += 20
-                
-                # 4. Video title contains artist name
-                if any(word in title_lower for word in artist_name_lower.split()):
-                    score += 25
-                
-                # ====== NEGATIVE SCORING (Record Label Detection) ======
-                
-                # 5. RECORD LABEL PENALTIES - CRITICAL ADDITION
-                record_label_indicators = [
-                    'records', 'recordings', 'entertainment', 'music group',
-                    'global', 'official music', 'vevo', 'network', 'corporation',
-                    'studio', 'productions', 'channel', 'hq', 'tv', 'media'
-                ]
-                
-                # Penalize if channel contains record label terms
-                for indicator in record_label_indicators:
-                    if indicator in channel_lower:
-                        penalties += 40  # Heavy penalty
-                        break
-                
-                # 6. Penalize if channel name is MUCH longer than artist name (labels often have longer names)
-                if len(channel_name) > len(artist_name) * 2:
-                    penalties += 20
-                
-                # 7. Penalize if channel name contains common company suffixes
-                company_suffixes = ['inc', 'llc', 'ltd', 'co', 'corp']
-                for suffix in company_suffixes:
-                    if f' {suffix}' in channel_lower or f'({suffix})' in channel_lower:
-                        penalties += 30
-                
-                # ====== VIDEO CONTENT VERIFICATION ======
-                
-                # 8. Check multiple videos from this channel to see if they feature our artist
-                if score - penalties >= 40:  # Only check promising candidates
-                    try:
-                        # Search for more videos from this channel
-                        channel_videos = YoutubeSearch(channel_name, max_results=10).to_dict()
-                        
-                        artist_video_count = 0
-                        total_checked = 0
-                        
-                        for video in channel_videos:
-                            if video['channel'].strip() == channel_name:
-                                total_checked += 1
-                                video_title = video['title'].lower()
-                                
-                                # Check if this video features our artist
-                                if any(word in video_title for word in artist_name_lower.split()):
-                                    artist_video_count += 1
-                                
-                                if total_checked >= 5:
-                                    break
-                        
-                        # Calculate artist concentration in channel
-                        if total_checked > 0:
-                            artist_concentration = artist_video_count / total_checked
-                            
-                            # Reward channels with high artist concentration
-                            if artist_concentration >= 0.6:  # 60%+ videos feature artist
-                                score += 40
-                            elif artist_concentration >= 0.3:  # 30-59% videos feature artist
-                                score += 20
-                            else:  # Less than 30% videos feature artist
-                                penalties += 30  # Penalize channels with little artist content
-                    
-                    except Exception as e:
-                        # If we can't check, give neutral score
-                        pass
-                
-                # 9. View count as engagement signal
-                if result.get('views'):
-                    views_text = result['views'].lower()
-                    if 'm' in views_text:
-                        score += 15
-                    elif 'k' in views_text:
-                        score += 10
-                
-                # 10. Official video patterns
-                if re.search(r'[【\[\(].*[】\]\)]', result['title']):
-                    score += 15
-                
-                # Apply penalties
-                final_score = max(0, score + name_cleanliness - penalties)
-                
-                # Only consider promising candidates
-                if final_score >= 50:  # Increased threshold
-                    all_candidates.append({
-                        'channel': channel_name,
-                        'score': final_score,
-                        'query_used': search_query,
-                        'video_title': result['title'],
-                        'artist_match_quality': score,
-                        'label_penalties': penalties
-                    })
-            
-            time.sleep(0.2)
-        except Exception as e:
-            continue
-    
-    # Select best candidate with additional verification
-    if all_candidates:
-        all_candidates.sort(key=lambda x: x['score'], reverse=True)
-        
-        # Try top 3 candidates for best match
-        for candidate in all_candidates[:3]:
-            channel_name = candidate['channel']
-            
-            # FINAL VERIFICATION: Deep check of channel content
-            try:
-                channel_check = YoutubeSearch(channel_name, max_results=20).to_dict()
-                channel_videos = [r for r in channel_check if r['channel'].strip() == channel_name]
-                
-                if len(channel_videos) >= 3:
-                    # Count how many videos feature our artist
-                    artist_videos = 0
-                    for video in channel_videos[:10]:  # Check first 10
-                        video_title = video['title'].lower()
-                        artist_name_lower = artist_name.lower()
-                        
-                        if any(word in video_title for word in artist_name_lower.split()):
-                            artist_videos += 1
-                    
-                    # Only accept if at least 30% of videos feature our artist
-                    if artist_videos >= max(2, len(channel_videos[:10]) * 0.3):
-                        return channel_name, "FOUND", search_queries
-                    else:
-                        # This channel doesn't have enough artist content
-                        continue
-                        
-            except:
-                continue
-        
-        # If no channel passed final verification, return the top candidate anyway
-        return all_candidates[0]['channel'], "FOUND", search_queries
-    
-    return None, "NOT_FOUND", search_queries
-
-def discover_channel_videos(locked_channel: str, artist_name: str, min_videos: int = 20) -> List[Dict]:
-    """
-    UNIVERSAL: Discover videos from a channel and identify music videos using structural patterns
-    Returns list of videos sorted by likelihood of being official music videos
-    """
-    
-    if not locked_channel:
-        return []
-    
-    all_videos = []
-    
-    # Search for channel content using multiple approaches
-    search_attempts = [
-        locked_channel,
-        f"{locked_channel} music",
-        f"{artist_name} {locked_channel}",
-    ]
-    
-    for search_query in search_attempts:
-        try:
-            results = YoutubeSearch(search_query, max_results=30).to_dict()
-            
-            for result in results:
-                # STRICT FILTER: Only videos from our exact channel
-                if result['channel'].strip() != locked_channel:
-                    continue
-                
-                # Score video for likelihood of being music video
-                score = score_video_music_likelihood(result, artist_name)
-                
-                if score >= 40:  # Minimum threshold
-                    all_videos.append({
-                        'url': f"https://www.youtube.com/watch?v={result['id']}",
-                        'title': result['title'],
-                        'channel': result['channel'],
-                        'duration': result.get('duration', ''),
-                        'views': result.get('views', ''),
-                        'score': score,
-                        'found_via': search_query
-                    })
-            
-            if len(all_videos) >= min_videos:
-                break
-                
-        except Exception as e:
-            continue
-    
-    # Remove duplicates by URL
-    unique_videos = {}
-    for video in all_videos:
-        video_id = video['url'].split('v=')[1].split('&')[0]
-        if video_id not in unique_videos:
-            unique_videos[video_id] = video
-    
-    return sorted(unique_videos.values(), key=lambda x: x['score'], reverse=True)
-
-def score_video_music_likelihood(video: Dict, artist_name: str) -> int:
-    """
-    TRULY UNIVERSAL: Score video using structural patterns only
-    No language-specific terms - works for Tamil, Korean, Arabic, etc.
-    """
-    score = 0
-    title = video['title']
-    
-    # 1. DURATION - Most reliable universal signal
-    if video.get('duration'):
-        duration = video['duration']
-        # Convert duration to seconds
-        try:
-            parts = duration.split(':')
-            if len(parts) == 2:  # MM:SS
-                minutes, seconds = int(parts[0]), int(parts[1])
-                total_seconds = minutes * 60 + seconds
-                
-                # Music videos are typically 2-10 minutes
-                if 120 <= total_seconds <= 600:  # 2-10 minutes
-                    score += 60
-                elif 90 <= total_seconds <= 720:  # 1.5-12 minutes (broader range)
-                    score += 40
-                elif 30 <= total_seconds <= 1200:  # 0.5-20 minutes (very broad)
-                    score += 20
-                    
-            elif len(parts) == 1:  # Just seconds (likely short clip)
-                if int(parts[0]) > 180:  # Over 3 minutes
-                    score += 30
-        except:
-            pass
-    
-    # 2. TITLE STRUCTURAL PATTERNS (universal)
-    # Look for patterns that indicate official/structured content
-    title_lower = title.lower()
-    
-    # Common structural markers in any language
-    structural_patterns = [
-        r'[\[\(][^\]\)]+[\]\)]',  # Brackets/parentheses with content
-        r'\d{4}',  # Years (often in official releases)
-        r'[A-Z]{2,}',  # Multiple uppercase letters (acronyms, etc.)
-        r'[|•\-–—]',  # Separators
-    ]
-    
-    for pattern in structural_patterns:
-        if re.search(pattern, title):
-            score += 10
-            break
-    
-    # 3. LENGTH PATTERNS - Official videos often have medium-length titles
-    title_length = len(title)
-    if 20 <= title_length <= 80:
-        score += 15
-    elif 10 <= title_length <= 120:
-        score += 10
-    
-    # 4. VIEW POPULARITY (if available)
-    if video.get('views'):
-        views_text = video['views'].lower()
-        if 'm' in views_text:
-            score += 25
-        elif 'k' in views_text:
-            score += 15
-        elif 'views' in views_text:
-            score += 10
-    
-    # 5. AVOID NON-MUSIC CONTENT (using universal signals)
-    # These patterns often indicate interviews, live sessions, etc.
-    non_music_indicators = [
-        'live at', 'concert', 'interview', 'behind the scenes',
-        'making of', 'documentary', 'backstage', 'rehearsal',
-        'acoustic session', 'unplugged', 'q&a', 'talk'
-    ]
-    
-    for indicator in non_music_indicators:
-        if indicator in title_lower:
-            score -= 30
-            break
-    
-    # 6. VIDEO FORMAT HINTS
-    format_indicators = [
-        '4k', 'hd', '1080p', 'official audio', 'visualizer',
-        'lyric video', 'lyrics', 'audio only'
-    ]
-    
-    for indicator in format_indicators:
-        if indicator in title_lower:
-            score += 5
-    
-    return max(0, score)  # Ensure non-negative score
-
 # =============================================================================
-# INTELLIGENT ARTIST ROTATION & GENRE HANDLING
+# ARTIST DISCOVERY - SIMPLIFIED FOR OLLAMA
 # =============================================================================
 
-def analyze_genre_popularity(genre: str, llm, search_attempts: int) -> Dict:
-    """Analyze genre for popularity/availability"""
+def find_artists_with_exclusion(genre: str, llm: Ollama, num_artists: int = 5) -> List[str]:
+    """Find artists with exclusion guarantee"""
     
-    prompt = PromptTemplate(
-        input_variables=["genre", "attempts"],
-        template="""Analyze the music genre: "{genre}"
-        
-        Classify its popularity level:
-        POPULAR: Mainstream, many artists with YouTube presence (e.g., Pop, Hip-Hop)
-        MODERATE: Established niche, several professional artists (e.g., Synthwave, Math Rock)  
-        NICHE: Limited artists, may lack official channels (e.g., Dungeon Synth, Microtonal)
-        
-        Return EXACTLY:
-        LEVEL: [POPULAR/MODERATE/NICHE]
-        EXPLANATION: [Brief reasoning]
-        ARTIST_POOL: [Estimated available artists: "50+", "10-30", or "1-10"]"""
-    )
+    exclusion_text = exclusion_manager.get_exclusion_list_for_prompt()
     
-    chain = LLMChain(llm=llm, prompt=prompt)
+    # Simplified prompt for Ollama
+    prompt_template = """Find {num_artists} popular music artists in the "{genre}" genre.
     
-    try:
-        result = chain.run({"genre": genre, "attempts": search_attempts})
-        
-        level = "MODERATE"
-        explanation = ""
-        artist_pool = "10-30"
-        
-        for line in result.strip().split('\n'):
-            if line.startswith("LEVEL:"):
-                level = line.replace("LEVEL:", "").strip()
-            elif line.startswith("EXPLANATION:"):
-                explanation = line.replace("EXPLANATION:", "").strip()
-            elif line.startswith("ARTIST_POOL:"):
-                artist_pool = line.replace("ARTIST_POOL:", "").strip()
-        
-        return {
-            "level": level,
-            "explanation": explanation,
-            "artist_pool": artist_pool,
-            "attempts": search_attempts
-        }
-    except:
-        return {
-            "level": "MODERATE",
-            "explanation": "Standard music genre",
-            "artist_pool": "10-30",
-            "attempts": search_attempts
-        }
+IMPORTANT: Do NOT suggest these already-suggested artists: {exclusion_list}
 
-def discover_artist_with_rotation(genre: str, llm, excluded_artists: List[str], 
-                                 genre_popularity: Dict, max_attempts: int = 3) -> Dict:
-    """Find artist with intelligent rotation"""
-    
-    current_attempt = genre_popularity["attempts"]
-    artist_pool = genre_popularity["artist_pool"]
-    
-    # Format excluded artists
-    if excluded_artists:
-        if artist_pool == "50+":
-            show_last = min(10, len(excluded_artists))
-        elif artist_pool == "10-30":
-            show_last = min(5, len(excluded_artists))
-        else:
-            show_last = min(3, len(excluded_artists))
-        
-        shown_excluded = excluded_artists[-show_last:] if excluded_artists else []
-        excluded_text = "\n".join([f"- {artist}" for artist in shown_excluded])
-    else:
-        excluded_text = "None"
-    
-    # Adjust prompt based on genre popularity
-    if genre_popularity["level"] == "POPULAR":
-        artist_requirement = f"Choose a DIFFERENT mainstream artist from {genre}. Many artists available."
-    elif genre_popularity["level"] == "MODERATE":
-        artist_requirement = f"Choose an established artist from {genre}. Be creative but realistic."
-    else:
-        if current_attempt >= 2:
-            return {
-                "status": "GENRE_TOO_NICHE",
-                "message": f"Genre '{genre}' appears too niche.",
-                "attempts": current_attempt
-            }
-        artist_requirement = f"This is a niche genre. Choose carefully."
-    
+Requirements:
+1. Must be popular in {genre}
+2. Must have an official YouTube channel
+3. Must have music released before 2024
+4. Must NOT be in the excluded list
+
+Return ONLY artist names, one per line, with no numbers or bullets:
+
+Artist Name 1
+Artist Name 2
+Artist Name 3
+Artist Name 4
+Artist Name 5"""
+
     prompt = PromptTemplate(
-        input_variables=["genre", "excluded_text", "artist_requirement", "attempt"],
-        template="""Find ONE artist for music genre: {genre}
-        
-        {artist_requirement}
-        
-        REQUIREMENTS:
-        1. Artist should have YouTube presence
-        2. Not in excluded list: {excluded_text}
-        
-        Return EXACTLY:
-        ARTIST: [Artist Name]
-        CONFIDENCE: [High/Medium/Low - confidence in YouTube presence]
-        NOTE: [Brief note about the artist]"""
+        input_variables=["genre", "exclusion_list", "num_artists"],
+        template=prompt_template
     )
     
     chain = LLMChain(llm=llm, prompt=prompt)
@@ -609,459 +345,506 @@ def discover_artist_with_rotation(genre: str, llm, excluded_artists: List[str],
     try:
         result = chain.run({
             "genre": genre,
-            "excluded_text": excluded_text,
-            "artist_requirement": artist_requirement,
-            "attempt": current_attempt
+            "exclusion_list": exclusion_text,
+            "num_artists": num_artists
         })
         
-        artist = ""
-        confidence = "Medium"
-        note = ""
-        
+        # Parse artists
+        artists = []
         for line in result.strip().split('\n'):
-            if line.startswith("ARTIST:"):
-                artist = line.replace("ARTIST:", "").strip()
-            elif line.startswith("CONFIDENCE:"):
-                confidence = line.replace("CONFIDENCE:", "").strip()
-            elif line.startswith("NOTE:"):
-                note = line.replace("NOTE:", "").strip()
+            line = line.strip()
+            if line and len(line) > 2:
+                # Clean up
+                artist = re.sub(r'^\d+[\.\)]\s*', '', line)  # Remove numbering
+                artist = re.sub(r'^[-*•]\s*', '', artist)    # Remove bullets
+                artist = artist.strip('"\' ')
+                
+                if artist and not exclusion_manager.is_artist_excluded(artist):
+                    artists.append(artist)
         
-        if not artist:
-            return {
-                "status": "NO_ARTIST_FOUND",
-                "explanation": "Could not identify artist.",
-                "attempts": current_attempt
-            }
+        return artists[:num_artists]
         
-        return {
-            "status": "ARTIST_FOUND",
-            "artist": artist,
-            "confidence": confidence,
-            "note": note,
-            "attempts": current_attempt
-        }
-    
     except Exception as e:
-        return {
-            "status": "ERROR",
-            "explanation": f"Error: {str(e)}",
-            "attempts": current_attempt
-        }
-
-def handle_niche_genre_fallback(genre: str, llm, attempts: int) -> Dict:
-    """Provide fallback for niche genres"""
-    
-    prompt = PromptTemplate(
-        input_variables=["genre", "attempts"],
-        template="""The music genre "{genre}" appears too niche for official YouTube channels.
-        
-        After {attempts} attempts, please provide:
-        1. Explanation of why this genre lacks official channels
-        2. 3 representative song titles
-        3. Suggestions for exploring this genre
-        
-        Return EXACTLY:
-        EXPLANATION: [Explanation]
-        SONG_1: [Song 1]
-        SONG_2: [Song 2]
-        SONG_3: [Song 3]
-        SUGGESTIONS: [Suggestions]"""
-    )
-    
-    chain = LLMChain(llm=llm, prompt=prompt)
-    
-    try:
-        result = chain.run({"genre": genre, "attempts": attempts})
-        
-        explanation = ""
-        songs = []
-        suggestions = ""
-        
-        for line in result.strip().split('\n'):
-            if line.startswith("EXPLANATION:"):
-                explanation = line.replace("EXPLANATION:", "").strip()
-            elif line.startswith("SONG_1:"):
-                songs.append(line.replace("SONG_1:", "").strip())
-            elif line.startswith("SONG_2:"):
-                songs.append(line.replace("SONG_2:", "").strip())
-            elif line.startswith("SONG_3:"):
-                songs.append(line.replace("SONG_3:", "").strip())
-            elif line.startswith("SUGGESTIONS:"):
-                suggestions = line.replace("SUGGESTIONS:", "").strip()
-        
-        return {
-            "explanation": explanation,
-            "songs": songs[:3],
-            "suggestions": suggestions,
-            "genre": genre,
-            "attempts": attempts
-        }
-    
-    except:
-        return {
-            "explanation": f"'{genre}' is too niche for official YouTube content.",
-            "songs": [f"{genre} song 1", f"{genre} song 2", f"{genre} song 3"],
-            "suggestions": f"Try searching '{genre}' on Bandcamp or SoundCloud.",
-            "genre": genre,
-            "attempts": attempts
-        }
+        return []
 
 # =============================================================================
-# STREAMLIT APP WITH UPDATED UI
+# CHANNEL DISCOVERY
+# =============================================================================
+
+def find_official_channel(artist: str) -> Optional[str]:
+    """Find official YouTube channel for an artist"""
+    
+    search_queries = [
+        f"{artist} official",
+        f"{artist} VEVO",
+        f"{artist} official music",
+        f"{artist} channel",
+        f"{artist}"
+    ]
+    
+    for query in search_queries:
+        try:
+            results = smart_youtube_search(query, max_results=10)
+            
+            for result in results:
+                channel_name = result['channel'].strip()
+                channel_lower = channel_name.lower()
+                
+                # Skip unwanted channels
+                if any(kw in channel_lower for kw in ['topic', 'lyrics', 'mix', 'compilation']):
+                    continue
+                
+                # Check if channel seems official
+                artist_lower = artist.lower()
+                similarity = SequenceMatcher(None, artist_lower, channel_lower).ratio()
+                
+                if (similarity > 0.6 or 
+                    artist_lower in channel_lower or
+                    any(kw in channel_lower for kw in ['vevo', 'official', 'music'])):
+                    return channel_name
+        
+        except Exception:
+            continue
+    
+    return None
+
+# =============================================================================
+# VIDEO DISCOVERY
+# =============================================================================
+
+def discover_videos_from_channel(channel_name: str, artist_name: str) -> List[Dict]:
+    """Discover videos from the locked channel"""
+    
+    queries = [
+        channel_name,
+        f"{artist_name} {channel_name}",
+        f"{channel_name} music"
+    ]
+    
+    all_videos = []
+    seen_ids = set()
+    
+    for query in queries:
+        try:
+            results = smart_youtube_search(query, max_results=20)
+            
+            for result in results:
+                # Must be from the locked channel
+                if result['channel'].strip().lower() != channel_name.lower():
+                    continue
+                
+                video_id = result['id']
+                if video_id in seen_ids:
+                    continue
+                seen_ids.add(video_id)
+                
+                # Score video
+                score = 0
+                title = result['title'].lower()
+                
+                # Check for official indicators
+                if any(kw in title for kw in ['official video', 'music video', 'mv']):
+                    score += 50
+                elif 'official' in title:
+                    score += 30
+                
+                # Check duration (2-8 minutes ideal)
+                if result.get('duration'):
+                    try:
+                        parts = result['duration'].split(':')
+                        if len(parts) == 2:
+                            mins = int(parts[0])
+                            if 2 <= mins <= 10:
+                                score += 20
+                    except:
+                        pass
+                
+                # Avoid non-music content
+                if any(kw in title for kw in ['interview', 'behind', 'rehearsal', 'practice']):
+                    score -= 30
+                
+                if score > 20:  # Minimum threshold
+                    all_videos.append({
+                        'id': video_id,
+                        'url': f"https://www.youtube.com/watch?v={video_id}",
+                        'title': result['title'],
+                        'duration': result.get('duration', ''),
+                        'views': result.get('views', ''),
+                        'score': score
+                    })
+        
+        except Exception:
+            continue
+    
+    # Sort by score
+    all_videos.sort(key=lambda x: x['score'], reverse=True)
+    
+    # Remove similar titles
+    unique_videos = []
+    seen_titles = set()
+    
+    for video in all_videos:
+        # Simple deduplication
+        title_norm = video['title'].lower()
+        title_norm = re.sub(r'\s*\(.*?\)', '', title_norm)
+        title_norm = re.sub(r'\s*\[.*?\]', '', title_norm)
+        title_norm = re.sub(r'\s*official.*', '', title_norm)
+        title_norm = re.sub(r'\s*music video.*', '', title_norm)
+        title_norm = re.sub(r'[^\w\s]', ' ', title_norm)
+        title_norm = re.sub(r'\s+', ' ', title_norm).strip()
+        
+        if title_norm not in seen_titles:
+            seen_titles.add(title_norm)
+            unique_videos.append(video)
+    
+    return unique_videos[:15]
+
+# =============================================================================
+# MAIN DISCOVERY ENGINE
+# =============================================================================
+
+def discover_music_for_genre(genre: str, llm: Ollama, max_attempts: int = 3) -> Tuple[Optional[Dict], str]:
+    """Main discovery function"""
+    
+    st.session_state.total_searches += 1
+    
+    for attempt in range(1, max_attempts + 1):
+        artists = find_artists_with_exclusion(genre, llm, num_artists=5)
+        
+        if not artists:
+            continue
+        
+        for artist in artists:
+            # Final check
+            if exclusion_manager.is_artist_excluded(artist):
+                continue
+            
+            # Find channel
+            channel = find_official_channel(artist)
+            if not channel:
+                continue
+            
+            # Find videos
+            videos = discover_videos_from_channel(channel, artist)
+            if len(videos) < SONGS_REQUIRED:
+                continue
+            
+            # Get top songs
+            selected_songs = videos[:SONGS_REQUIRED]
+            
+            # Register artist
+            exclusion_manager.register_artist(artist, genre)
+            st.session_state.performance_stats['successful_searches'] += 1
+            
+            return {
+                'artist': artist,
+                'channel': channel,
+                'songs': selected_songs,
+                'attempt': attempt
+            }, "SUCCESS"
+    
+    return None, "NO_UNIQUE_ARTISTS_FOUND"
+
+# =============================================================================
+# POPULAR GENRE VALIDATION
+# =============================================================================
+
+def get_popular_genres() -> List[str]:
+    """Return list of popular genres"""
+    return [
+        "Pop", "Rock", "Hip Hop", "Rap", "R&B", "Country", "Jazz", "Classical",
+        "Electronic", "EDM", "Blues", "Reggae", "Folk", "Metal", "Punk", "Soul",
+        "Funk", "Disco", "Techno", "House", "Trance", "Dubstep", "Indie", 
+        "Alternative", "K-pop", "J-pop", "C-pop", "Latin", "Reggaeton", "Salsa", 
+        "Bachata", "Tango", "Ska", "Gospel", "Christian", "World", "New Age",
+        "Ambient", "Soundtrack", "Musical", "Opera", "Anime", "Bollywood",
+        "Afrobeats", "Amapiano", "Phonk", "Hyperpop", "Synthwave", "Lo-fi",
+        "Drill", "Trap", "Vaporwave", "Future Bass", "Progressive", "Hardstyle",
+        "Grunge", "Emo", "Shoegaze", "Post-rock", "Experimental", "Acoustic"
+    ]
+
+def is_genre_popular(genre: str) -> bool:
+    """Check if genre is popular"""
+    genre_lower = genre.lower().strip()
+    popular_genres = [g.lower() for g in get_popular_genres()]
+    
+    if genre_lower in popular_genres:
+        return True
+    
+    for popular in popular_genres:
+        if popular in genre_lower or genre_lower in popular:
+            return True
+    
+    return False
+
+# =============================================================================
+# STREAMLIT UI - SIMPLIFIED
 # =============================================================================
 
 def main():
     st.set_page_config(
-        page_title="IAMUSIC (Ollama)",
+        page_title="IAMUSIC - Offline",
         page_icon="🎵",
-        layout="wide"
+        layout="wide",
+        initial_sidebar_state="expanded"
     )
     
-    # Initialize session state
-    if 'sessions' not in st.session_state:
-        st.session_state.sessions = []
-    if 'excluded_artists' not in st.session_state:
-        st.session_state.excluded_artists = []
-    if 'genre_attempts' not in st.session_state:
-        st.session_state.genre_attempts = {}
-    if 'genre_popularity' not in st.session_state:
-        st.session_state.genre_popularity = {}
-    
-    # Custom CSS from DeepSeek version
+    # Custom CSS
     st.markdown("""
     <style>
-    .universal-badge {
+    .main-header {
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        font-weight: 800;
+    }
+    
+    .offline-badge {
+        background: linear-gradient(135deg, #4CAF50 0%, #2E7D32 100%);
         color: white;
-        padding: 4px 12px;
+        padding: 6px 12px;
         border-radius: 20px;
-        font-size: 0.9em;
-        display: inline-block;
-        margin: 5px;
-    }
-            
-    }
-    .artist-match-high {
-        background: linear-gradient(135deg, #4CAF50 0%, #8BC34A 100%);
-        color: white;
-        padding: 3px 8px;
-        border-radius: 12px;
         font-size: 0.8em;
         display: inline-block;
-        margin: 2px;
+        font-weight: 600;
     }
-    .artist-match-medium {
-        background: linear-gradient(135deg, #FF9800 0%, #FFC107 100%);
-        color: white;
-        padding: 3px 8px;
-        border-radius: 12px;
-        font-size: 0.8em;
-        display: inline-block;
-        margin: 2px;
-    }
-    .ai-badge {
-        background: linear-gradient(135deg, #9C27B0 0%, #673AB7 100%);
-        color: white;
-        padding: 3px 8px;
-        border-radius: 12px;
-        font-size: 0.8em;
-        display: inline-block;
-        margin: 2px;
+    
+    .stButton > button {
+        border-radius: 8px;
+        font-weight: 600;
     }
     </style>
     """, unsafe_allow_html=True)
     
-    # Header from DeepSeek version
-    st.title("🔊 I AM MUSIC (Ollama)")
-
-
-    # Sidebar from Ollama version (kept for functionality)
+    # Header
+    col1, col2 = st.columns([4, 1])
+    with col1:
+        st.markdown('<h1 class="main-header">🎵 IAMUSIC - Offline</h1>', unsafe_allow_html=True)
+        st.caption("⚡ Local AI • No API Keys • Privacy First")
+    
+    with col2:
+        st.markdown('<div class="offline-badge">🔌 OFFLINE MODE</div>', unsafe_allow_html=True)
+    
+    # Sidebar
     with st.sidebar:
-        st.header("⚙️ Ollama Configuration")
+        st.header("⚙️ Ollama Settings")
         
-        st.markdown("### Model Settings")
-        model_name = st.text_input(
-            "Ollama Model:",
-            value="gemma3n:e4b",
-            help="Enter the Ollama model name you have installed"
+        # Ollama URL
+        base_url = st.text_input(
+            "Ollama URL",
+            value=st.session_state.get('ollama_base_url', "http://localhost:11434"),
+            help="Default: http://localhost:11434"
         )
+        st.session_state.ollama_base_url = base_url
         
-        ollama_url = st.text_input(
-            "Ollama URL:",
-            value="http://localhost:11434",
-            help="URL where Ollama is running"
-        )
+        # Get available models
+        available_models = get_available_models(base_url)
         
-        if st.button("🔄 Initialize Ollama Connection", type="primary", use_container_width=True):
-            with st.spinner("Connecting to Ollama..."):
-                try:
-                    st.session_state.llm = ChatOllama(
-                        model=model_name,
-                        temperature=0.7,
-                        base_url=ollama_url,
-                        timeout=60
-                    )
-                    
-                    # Test the connection
-                    test_response = st.session_state.llm.invoke("Hello")
-                    if test_response:
-                        st.session_state.llm_initialized = True
-                        st.success("✅ Connected to Ollama!")
-                    else:
-                        st.error("❌ Ollama responded but returned empty response")
-                except Exception as e:
-                    st.error(f"❌ Failed to connect to Ollama: {e}")
-                    st.info("""
-                    **Troubleshooting:**
-                    1. Make sure Ollama is installed from https://ollama.com
-                    2. Pull the model: `ollama pull gemma3n:e4b`
-                    3. Run Ollama: `ollama serve`
-                    4. Check if Ollama is running at: {ollama_url}
-                    """)
-        
-        st.markdown("---")
-        
-        # Statistics from DeepSeek version
-        st.markdown("### 📊 Statistics")
-        st.write(f"Total sessions: {len(st.session_state.sessions)}")
-        st.write(f"Excluded artists: {len(st.session_state.excluded_artists)}")
-        
-        if st.session_state.genre_attempts:
-            st.markdown("#### Genre Attempts")
-            for genre, attempts in list(st.session_state.genre_attempts.items())[-5:]:
-                st.write(f"**{genre[:15]}...**: {attempts} searches")
-        
-        if st.button("🔄 Clear All Data", type="secondary", use_container_width=True):
-            st.session_state.sessions = []
-            st.session_state.excluded_artists = []
-            st.session_state.genre_attempts = {}
-            st.session_state.genre_popularity = {}
-            if 'llm_initialized' in st.session_state:
-                st.session_state.llm_initialized = False
-            if 'llm' in st.session_state:
-                st.session_state.llm = None
-            st.rerun()
-    
-    # Main input with centered layout from DeepSeek version
-    st.markdown("### Enter Any Music Genre")
-    
-    # Create a centered layout using columns
-    col1, col2, col3 = st.columns([2, 1, 1])  # Middle column is 2x wide, sides are narrow
-
-    with col1:  # This places the form only in the middle column
-        with st.form(key="search_form"):
-            genre_input = st.text_input(
-                "Genre name:",
-                placeholder="e.g., Tamil Pop, K-pop, Reggaeton, Synthwave...",
-                label_visibility="collapsed",
-                key="genre_input"
-            )
+        # Model selection
+        if available_models:
+            current_model = st.session_state.get('ollama_model', available_models[0])
             
-            submitted = st.form_submit_button("Search", use_container_width=True, type="primary")
-    
-    # Process search only when form is submitted (simplified logic)
-    if submitted and genre_input:
-        # Check if Ollama is initialized
-        if not hasattr(st.session_state, 'llm_initialized') or not st.session_state.llm_initialized or not st.session_state.llm:
-            st.error("❌ Ollama not initialized!")
-            st.info("Please click 'Initialize Ollama Connection' in the sidebar first.")
-            return
-        
-        llm = st.session_state.llm
-        
-        # Track genre attempts
-        if genre_input not in st.session_state.genre_attempts:
-            st.session_state.genre_attempts[genre_input] = 0
-        st.session_state.genre_attempts[genre_input] += 1
-        current_attempt = st.session_state.genre_attempts[genre_input]
-        
-        # Analyze genre popularity
-        if genre_input not in st.session_state.genre_popularity:
-            with st.spinner("Analyzing genre..."):
-                genre_analysis = analyze_genre_popularity(genre_input, llm, current_attempt)
-                st.session_state.genre_popularity[genre_input] = genre_analysis
+            # Ensure current model is in available list
+            if current_model not in available_models:
+                current_model = available_models[0]
+                st.session_state.ollama_model = current_model
+            
+            model = st.selectbox(
+                "Select Model",
+                options=available_models,
+                index=available_models.index(current_model),
+                help="Choose an Ollama model"
+            )
+            st.session_state.ollama_model = model
         else:
-            genre_analysis = st.session_state.genre_popularity[genre_input]
-            genre_analysis["attempts"] = current_attempt
-        
-        # Step 1: Find artist with rotation
-        with st.spinner(f"Finding {genre_input} artist..."):
-            artist_result = discover_artist_with_rotation(
-                genre_input,
-                llm,
-                st.session_state.excluded_artists,
-                genre_analysis
+            st.warning("No models detected. Pull a model first:")
+            st.code("ollama pull llama3.2:3b")
+            
+            model = st.selectbox(
+                "Select Model",
+                options=["llama3.2:3b", "llama3.1:8b", "gemma3n:e4b", "custom"],
+                index=0
             )
-        
-        # Handle niche genre case
-        if artist_result["status"] == "GENRE_TOO_NICHE":
-            st.markdown("---")
-            st.error("🎵 **Niche Genre Detected**")
             
-            with st.spinner("Preparing genre explanation..."):
-                niche_fallback = handle_niche_genre_fallback(genre_input, llm, current_attempt)
-            
-            st.write(niche_fallback["explanation"])
-            
-            st.markdown("### 🎶 Representative Songs")
-            cols = st.columns(3)
-            for idx, song in enumerate(niche_fallback["songs"][:3]):
-                with cols[idx]:
-                    st.info(f"**Song {idx+1}**")
-                    st.code(song)
-                    st.caption("⚠️ No official video available")
-            
-            session_data = {
-                "genre": genre_input,
-                "status": "NICHE_GENRE",
-                "explanation": niche_fallback["explanation"],
-                "songs": niche_fallback["songs"],
-                "attempt": current_attempt,
-                "timestamp": time.time()
-            }
-            st.session_state.sessions.append(session_data)
-            return
+            if model == "custom":
+                custom_model = st.text_input("Enter model name", value="llama3.2:3b")
+                st.session_state.ollama_model = custom_model
+            else:
+                st.session_state.ollama_model = model
         
-        elif artist_result["status"] != "ARTIST_FOUND":
-            st.error(f"Error: {artist_result.get('explanation', 'Unknown error')}")
-            return
+        # Test Connection
+        if st.button("🔗 Test Connection", use_container_width=True):
+            with st.spinner("Testing..."):
+                connected, message, models = test_ollama_connection(base_url, st.session_state.ollama_model)
+                if connected:
+                    st.success(f"✅ {message}")
+                    if models:
+                        st.session_state.available_models = models
+                    st.session_state.ollama_connected = True
+                else:
+                    st.error(f"❌ {message}")
+                    if models:
+                        st.info(f"Available models: {', '.join(models)}")
         
-        # Artist found
-        artist_name = artist_result["artist"]
-        
-        # Check duplicate
-        if artist_name in st.session_state.excluded_artists:
-            st.warning(f"⚠️ {artist_name} already suggested! Searching for alternative...")
-            return
-        
-        st.session_state.excluded_artists.append(artist_name)
-        
-        st.success(f"🎤 **Artist Found:** {artist_name}")
-        st.caption(f"Confidence: {artist_result.get('confidence', 'Medium')} | Note: {artist_result.get('note', '')}")
-        
-        # Step 2: Find and lock official channel (using LLM-optimized queries)
         st.markdown("---")
-        st.markdown("### 🔍 Finding Official Channel")
         
-        with st.spinner("Finding official YouTube channel"):
-            locked_channel, channel_status, search_queries = find_and_lock_official_channel(
-                artist_name, genre_input, llm
-            )
+        # Stats
+        st.header("📊 Stats")
+        stats = exclusion_manager.get_statistics()
         
-        if channel_status == "FOUND" and locked_channel:
-            st.success(f"✅ **Artist Channel Locked:** {locked_channel}")
-            
-            # Step 3: Discover videos that actually exist in the channel
-            with st.spinner(f"Exploring {locked_channel} for {artist_name} music videos..."):
-                available_videos = discover_channel_videos(locked_channel, artist_name)
-            
-            if not available_videos:
-                st.error(f"❌ No music videos found in {locked_channel}")
-                st.info(f"Channel might not have public music videos. Try searching '{artist_name}' manually.")
-                
-                session_data = {
-                    "genre": genre_input,
-                    "artist": artist_name,
-                    "locked_channel": locked_channel,
-                    "status": "NO_VIDEOS_IN_CHANNEL",
-                    "attempt": current_attempt,
-                    "timestamp": time.time()
-                }
-                st.session_state.sessions.append(session_data)
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("Artists", stats['total_excluded'])
+        with col2:
+            st.metric("Searches", stats['total_searches'])
+        
+        # Recent artists
+        if st.session_state.search_session_history:
+            with st.expander("🎤 Recent"):
+                for entry in st.session_state.search_session_history[-5:]:
+                    st.caption(f"**{entry['artist']}** → {entry['genre']}")
+        
+        st.markdown("---")
+        
+        # Controls
+        if st.button("🧹 Reset Session", use_container_width=True, type="secondary"):
+            exclusion_manager.clear_all_exclusions()
+            search_cache.clear()
+            st.rerun()
+        
+        # Quick pull commands
+        with st.expander("📥 Pull Models"):
+            st.write("Run in terminal:")
+            st.code("ollama pull llama3.2:3b")
+            st.code("ollama pull llama3.1:8b")
+            st.code("ollama pull gemma3n:e4b")
+    
+    # Main interface
+    st.markdown("### 🎶 Discover Music")
+    
+    with st.form("search_form"):
+        genre = st.text_input(
+            "Enter music genre",
+            placeholder="pop, rock, k-pop, anime, hip hop...",
+            value=st.session_state.get('last_genre', ''),
+            label_visibility="collapsed"
+        )
+        
+        submit = st.form_submit_button(
+            "🔍 Search",
+            use_container_width=True,
+            type="primary"
+        )
+    
+    # Process search
+    if submit and genre:
+        if not st.session_state.get('ollama_connected', False):
+            st.warning("⚠️ Please test Ollama connection first!")
+            return
+        
+        st.session_state.last_genre = genre
+        
+        # Initialize LLM
+        with st.spinner("🤖 Initializing AI..."):
+            llm = initialize_llm()
+            if not llm:
                 return
-            
-            # Select best 3 music videos (using AI to ensure different songs)
-            with st.spinner(f"🤖 Using AI to select different songs..."):
-                selected_videos = select_best_music_videos(available_videos, 3, llm)
-            
-            if len(selected_videos) < 3:
-                st.warning(f"⚠️ Only found {len(selected_videos)} suitable music videos")
+        
+        # Search
+        progress = st.progress(0)
+        status = st.empty()
+        
+        status.info(f"🔍 Searching for {genre} artists...")
+        progress.progress(30)
+        
+        result, message = discover_music_for_genre(genre, llm)
+        
+        if result:
+            progress.progress(100)
+            status.success(f"✅ Found {result['artist']}!")
             
             # Display results
-            st.markdown("---")
-            st.markdown(f"### 🎵 {artist_name} Music Videos from {locked_channel}")
-            
-            # Show AI-powered selection info
-            st.success(f"✅ **AI-Selected {len(selected_videos)} Distinct Songs**")
-            
-            videos_found = 0
-            cols = st.columns(3)
-            
-            for idx, video in enumerate(selected_videos):
-                with cols[idx % 3]:
-                    st.markdown(f'<div class="video-success">', unsafe_allow_html=True)
-                    st.markdown(f"**Song {idx+1}**")
-                    
-                    # Display video
-                    try:
-                        st.video(video['url'])
-                    except:
-                        video_id = video['url'].split('v=')[1].split('&')[0]
-                        st.image(f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg")
-                    
-                    # Title and info
-                    display_title = video['title']
-                    if len(display_title) > 40:
-                        display_title = display_title[:37] + "..."
-                    
-                    st.write(f"**{display_title}**")
-                    
-                    if video.get('duration'):
-                        st.caption(f"Duration: {video['duration']}")
-                    
-                    if video.get('score'):
-                        score = video['score']
-                        if score >= 70:
-                            st.markdown(f'<span class="artist-match-high">Match: {score}/100</span>', unsafe_allow_html=True)
-                        elif score >= 40:
-                            st.markdown(f'<span class="artist-match-medium">Match: {score}/100</span>', unsafe_allow_html=True)
-                    
-                    # Watch button
-                    st.markdown(
-                        f'<a href="{video["url"]}" target="_blank">'
-                        '<button style="background-color: #FF0000; color: white; '
-                        'border: none; padding: 8px 16px; border-radius: 4px; '
-                        'cursor: pointer; width: 100%;">▶ Watch on YouTube</button></a>',
-                        unsafe_allow_html=True
-                    )
-                    
-                    st.markdown("</div>", unsafe_allow_html=True)
-                    videos_found += 1
-            
-            # Store session
-            session_data = {
-                "genre": genre_input,
-                "artist": artist_name,
-                "locked_channel": locked_channel,
-                "status": "COMPLETE",
-                "videos_found": videos_found,
-                "total_videos": len(selected_videos),
-                "attempt": current_attempt,
-                "timestamp": time.time()
-            }
-            
-            st.session_state.sessions.append(session_data)
-            
-            # Summary
-            st.markdown("---")
-            if videos_found == 3:
-                st.success(f"🎉 **Perfect! Found 3 AI-selected songs from {locked_channel}**")
-            else:
-                st.warning(f"⚠️ Found {videos_found}/3 videos in the channel")
-        
+            display_results(result, genre)
         else:
-            # No channel found
-            st.error(f"❌ Could not find official channel for {artist_name}")
-            st.info(f"Try searching '{artist_name}' directly on YouTube.")
+            progress.progress(100)
+            status.error(f"❌ {message}")
             
-            session_data = {
-                "genre": genre_input,
-                "artist": artist_name,
-                "status": "NO_CHANNEL",
-                "attempt": current_attempt,
-                "timestamp": time.time()
-            }
-            st.session_state.sessions.append(session_data)
+            # Suggestions
+            st.info("💡 **Try these tips:**")
+            st.write("""
+            1. Make sure Ollama is running
+            2. Try a more specific genre
+            3. Clear session and try again
+            4. Try a different model
+            """)
+
+def display_results(result: Dict, genre: str):
+    """Display results"""
+    
+    st.markdown("---")
+    
+    # Artist info
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        st.markdown(f"## 🎤 {result['artist']}")
+        st.caption(f"**Genre:** {genre}")
+    
+    with col2:
+        st.caption(f"Attempt #{result['attempt']}")
+    
+    # Channel info
+    st.markdown(f"""
+    <div style='background: #f0f2f6; padding: 15px; border-radius: 10px; margin: 15px 0;'>
+    <div style='display: flex; align-items: center; gap: 8px; margin-bottom: 8px;'>
+    <div style='font-size: 18px; color: #4A00E0;'>🔒</div>
+    <div style='font-weight: 600; color: #4A00E0;'>LOCKED CHANNEL</div>
+    </div>
+    <div style='margin-left: 0;'>
+    <div style='font-size: 0.9em; color: #666; margin-bottom: 4px;'>{result['channel']}</div>
+    <div style='font-size: 0.9em; color: #666;'>All songs are from this official channel</div>
+    </div>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Songs
+    st.markdown("### 🎵 Songs")
+    
+    cols = st.columns(3)
+    
+    for idx, song in enumerate(result['songs']):
+        with cols[idx]:
+            # Thumbnail
+            video_id = song['id']
+            try:
+                st.video(song['url'])
+            except:
+                st.image(f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg", use_column_width=True)
+            
+            # Title
+            title = song['title']
+            if len(title) > 50:
+                title = title[:47] + "..."
+            st.markdown(f"**{title}**")
+            
+            # Metadata
+            if song.get('duration'):
+                st.caption(f"⏱️ {song['duration']}")
+            if song.get('views'):
+                st.caption(f"👁️ {song['views']}")
+            
+            # Watch button
+            st.markdown(
+                f'<a href="{song["url"]}" target="_blank">'
+                '<button style="background: #FF0000; color: white; width: 100%; '
+                'padding: 8px; border-radius: 6px; border: none; cursor: pointer; '
+                'font-weight: 600; margin-top: 10px;">▶️ Watch on YouTube</button></a>',
+                unsafe_allow_html=True
+            )
+    
+    # Next search
+    st.markdown("---")
+    if st.button(f"🔍 Find Another {genre} Artist", use_container_width=True):
+        st.rerun()
 
 if __name__ == "__main__":
     main()
