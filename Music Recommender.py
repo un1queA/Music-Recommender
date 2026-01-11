@@ -812,7 +812,7 @@ def main():
         # Check if genre is popular
         is_popular = is_genre_popular(genre)
         
-        progress_placeholder.info(f"🔍 **Phase 1:** Searching for **{genre}** artists...")
+        progress_placeholder.info("Cooking up some beats 🎧🔥")
         progress_bar.progress(0.2)
         
         # Main discovery
