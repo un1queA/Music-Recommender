@@ -215,7 +215,7 @@ def initialize_llm(api_key: str) -> Optional[ChatOpenAI]:
     try:
         return ChatOpenAI(
             model="deepseek-chat",
-            temperature=0.3,
+            temperature=0.8,
             openai_api_key=api_key,
             openai_api_base="https://api.deepseek.com",
             max_tokens=1000,
@@ -960,3 +960,4 @@ def display_results(result: Dict, genre: str):
 
 if __name__ == "__main__":
     main()
+
