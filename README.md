@@ -42,5 +42,9 @@ Have fun!
 
 https://github.com/user-attachments/assets/c7b32ab9-0f6e-48ee-a237-545fd66a9c15
 
+# Demo video for Ollama
+
+
+
 
 
