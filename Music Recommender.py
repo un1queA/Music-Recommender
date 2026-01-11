@@ -761,25 +761,14 @@ def main():
         
         st.markdown("---")
         
-        # Controls - FIXED LINE
-        st.header("🛠️ Controls")
-        
-        # FIX: st.columns returns a tuple, so we need to either:
-        # Option 1: Unpack it with a comma
-        # col1, = st.columns(1)
-        
-        # Option 2: Access the first element (simpler for single column)
-        col1 = st.columns(1)[0]
-        
-        with col1:
-            if st.button("🧹 Reset Session", use_container_width=True, type="secondary"):
-                exclusion_manager.clear_all_exclusions()
-                st.success("Session reset! All artists can be suggested again.")
-                time.sleep(1)
-                st.rerun()
+      # Controls
+        if st.button("🧹 Reset Session", use_container_width=True, type="secondary"):
+            exclusion_manager.clear_all_exclusions()
+            search_cache.clear()
+            st.rerun()
     
     # Main search interface
-    st.markdown("### 🎶 Discover New Artists & Songs")
+    st.markdown("### 🎶 Discover  Music")
     
     with st.form("search_form", border=False):
         col1, col2 = st.columns([4, 1])
@@ -960,4 +949,3 @@ def display_results(result: Dict, genre: str):
 
 if __name__ == "__main__":
     main()
-
